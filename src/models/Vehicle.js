@@ -48,6 +48,14 @@ const Vehicle = sequelize.define(
       defaultValue: false,
       allowNull: false,
     },
+    deviceName: {
+      type: DataTypes.STRING(100),
+      allowNull: true,
+    },
+    deviceType: {
+      type: DataTypes.STRING(50),
+      allowNull: true,
+    },
     serverIp: {
       type: DataTypes.STRING(100),
       allowNull: true,
@@ -55,6 +63,11 @@ const Vehicle = sequelize.define(
     serverPort: {
       type: DataTypes.INTEGER,
       allowNull: true,
+    },
+    vehicleIcon: {
+      type: DataTypes.STRING(50),
+      allowNull: true,
+      defaultValue: 'car',
     },
   },
   {

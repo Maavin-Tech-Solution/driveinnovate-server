@@ -1,11 +1,25 @@
 const { Vehicle, RtoDetail, User } = require('../models');
-const { Location, isMongoDBConnected } = require('../config/mongodb');
+const { Location, FMB125Location, isMongoDBConnected } = require('../config/mongodb');
+
+// FMB125 device types that should use fmb125locations collection
+const FMB125_DEVICE_TYPES = ['FMB125', 'FMB120', 'FMB130', 'FMB140', 'FMB920'];
+
+/**
+ * Get the correct MongoDB Location model based on vehicle device type
+ */
+const getLocationModel = (deviceType) => {
+  if (deviceType && FMB125_DEVICE_TYPES.includes(deviceType.toUpperCase())) {
+    return FMB125Location;
+  }
+  return Location;
+};
 
 /**
  * Helper function to fetch GPS data from MongoDB for a given IMEI
  * Handles IMEI with or without leading zeros
+ * Uses correct collection based on device type
  */
-const fetchGpsData = async (imei) => {
+const fetchGpsData = async (imei, deviceType) => {
   if (!imei) {
     console.log('[GPS] No IMEI provided');
     return null;
@@ -18,7 +32,8 @@ const fetchGpsData = async (imei) => {
   }
   
   try {
-    console.log(`[GPS] Searching for IMEI: ${imei}`);
+    const LocationModel = getLocationModel(deviceType);
+    console.log(`[GPS] Searching for IMEI: ${imei} in ${deviceType ? deviceType : 'GT06'} collection`);
     
     // Normalize IMEI - try both with and without leading zero
     const imeiVariations = [
@@ -30,7 +45,7 @@ const fetchGpsData = async (imei) => {
     
     // Try to fetch latest location with actual GPS coordinates using any IMEI variation
     // Only select required fields for performance
-    const gpsData = await Location.findOne({ 
+    const gpsData = await LocationModel.findOne({ 
       imei: { $in: imeiVariations },
       latitude: { $exists: true, $ne: null },
       longitude: { $exists: true, $ne: null }
@@ -46,9 +61,9 @@ const fetchGpsData = async (imei) => {
       console.log(`[GPS] ✗ No GPS data found for IMEI variations:`, imeiVariations);
       
       // Check if record exists without coordinates
-      const anyRecord = await Location.findOne({ imei: { $in: imeiVariations } }).lean();
+      const anyRecord = await LocationModel.findOne({ imei: { $in: imeiVariations } }).lean();
       if (anyRecord) {
-        console.log(`[GPS] Record exists but no coordinates. PacketType: ${anyRecord.packetType}`);
+        console.log(`[GPS] Record exists but no coordinates. PacketType: ${anyRecord.packetType || anyRecord.eventType || 'unknown'}`);
       }
     }
     
@@ -63,8 +78,9 @@ const fetchGpsData = async (imei) => {
 /**
  * Helper function to fetch comprehensive device status from multiple packet types
  * Fetches latest packets of each type to build complete vehicle status
+ * Supports both GT06 and FMB125 device types
  */
-const fetchComprehensiveDeviceStatus = async (imei) => {
+const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
   if (!imei) {
     console.log('[DEVICE] No IMEI provided');
     return null;
@@ -76,8 +92,11 @@ const fetchComprehensiveDeviceStatus = async (imei) => {
     return null;
   }
   
+  const isFMB125 = deviceType && FMB125_DEVICE_TYPES.includes(deviceType.toUpperCase());
+  const LocationModel = getLocationModel(deviceType);
+  
   try {
-    console.log(`[DEVICE] Fetching comprehensive status for IMEI: ${imei}`);
+    console.log(`[DEVICE] Fetching comprehensive status for IMEI: ${imei} (${isFMB125 ? 'FMB125' : 'GT06'})`);
     
     // Normalize IMEI - try both with and without leading zero
     const imeiVariations = [
@@ -85,6 +104,11 @@ const fetchComprehensiveDeviceStatus = async (imei) => {
       imei.startsWith('0') ? imei.substring(1) : `0${imei}`
     ];
     
+    if (isFMB125) {
+      return await fetchFMB125Status(LocationModel, imeiVariations);
+    }
+    
+    // ── GT06 packet-based fetch (existing logic) ──
     // Fetch latest packets of each important type in parallel
     const [locationData, locationExtData, statusData, heartbeatData, odometerData, voltageData, alarmData] = await Promise.all([
       // LOCATION (0x12) - Basic GPS location with ignition
@@ -291,11 +315,114 @@ const fetchComprehensiveDeviceStatus = async (imei) => {
 };
 
 /**
+ * Fetch comprehensive status for FMB125/Teltonika devices
+ * FMB125 stores all data in a single record (AVL data) rather than separate packet types
+ */
+const fetchFMB125Status = async (LocationModel, imeiVariations) => {
+  try {
+    // FMB125 stores everything in one record, just get the latest with GPS
+    const latestRecord = await LocationModel.findOne({
+      imei: { $in: imeiVariations },
+      latitude: { $exists: true, $ne: null },
+      longitude: { $exists: true, $ne: null }
+    })
+      .sort({ timestamp: -1 })
+      .lean();
+
+    if (!latestRecord) {
+      console.log('[DEVICE/FMB125] ✗ No records found');
+      return null;
+    }
+
+    console.log(`[DEVICE/FMB125] ✓ Found latest record for IMEI: ${latestRecord.imei}`);
+
+    const aggregatedData = {
+      deviceType: 'FMB125',
+      
+      // GPS Data
+      gpsData: {
+        latitude: latestRecord.latitude,
+        longitude: latestRecord.longitude,
+        speed: latestRecord.speed || 0,
+        satellites: latestRecord.satellites || 0,
+        course: latestRecord.angle,
+        altitude: latestRecord.altitude,
+        gpsFixed: latestRecord.gpsValid !== false,
+        hdop: latestRecord.hdop,
+        timestamp: latestRecord.timestamp
+      },
+      
+      // Device Status
+      status: {
+        ignition: latestRecord.ignition ?? null,
+        movement: latestRecord.movement ?? null,
+        battery: latestRecord.batteryLevel ?? null,
+        voltage: latestRecord.externalVoltage ? latestRecord.externalVoltage / 1000 : null, // mV to V
+        batteryVoltage: latestRecord.batteryVoltage ? latestRecord.batteryVoltage / 1000 : null, // mV to V
+        gsmSignal: latestRecord.gsmSignal ?? null,
+        charging: null,
+        defense: null,
+        oil: null,
+        electric: null,
+        door: null,
+        gpsTracking: latestRecord.gpsValid ?? null
+      },
+      
+      // Fuel Data (FMB125 specific)
+      fuel: {
+        level: latestRecord.fuelLevel ?? latestRecord.canFuelLevel ?? null,
+        used: latestRecord.fuelUsed ?? latestRecord.canFuelUsed ?? null,
+        rate: latestRecord.fuelRate ?? null,
+        sensorVoltage: latestRecord.fuelSensorVoltage ?? null
+      },
+      
+      // Engine Data (FMB125 specific)
+      engine: {
+        speed: latestRecord.engineSpeed ?? latestRecord.canEngineSpeed ?? null,
+        temperature: latestRecord.engineTemp ?? latestRecord.canEngineTemp ?? null,
+        load: latestRecord.engineLoad ?? latestRecord.canEngineLoad ?? null,
+        hours: latestRecord.engineHours ?? null
+      },
+      
+      // Trip Information
+      trip: {
+        odometer: latestRecord.totalOdometer ? latestRecord.totalOdometer / 1000 : null, // meters to km
+        tripOdometer: latestRecord.tripOdometer ? latestRecord.tripOdometer / 1000 : null, // meters to km
+        canMileage: latestRecord.canMileage ?? null
+      },
+      
+      // Alerts
+      alerts: {
+        latestAlarm: latestRecord.alarmType || latestRecord.eventType || null,
+        alarmTimestamp: latestRecord.alarmType ? latestRecord.timestamp : null
+      },
+      
+      // Driver
+      driver: {
+        iButtonId: latestRecord.iButtonId ?? null,
+        name: latestRecord.driverName ?? null
+      },
+      
+      // Metadata
+      lastUpdate: latestRecord.timestamp,
+      priority: latestRecord.priority
+    };
+
+    console.log(`[DEVICE/FMB125] Status: IGN=${aggregatedData.status.ignition}, FUEL=${aggregatedData.fuel.level}%, V=${aggregatedData.status.voltage}V, RPM=${aggregatedData.engine.speed}`);
+
+    return aggregatedData;
+  } catch (error) {
+    console.error('[DEVICE/FMB125] Error:', error.message);
+    return null;
+  }
+};
+
+/**
  * Helper function to attach GPS data to a vehicle object
  */
 const attachGpsData = async (vehicle) => {
   const vehicleJson = vehicle.toJSON();
-  const gpsData = await fetchGpsData(vehicleJson.imei);
+  const gpsData = await fetchGpsData(vehicleJson.imei, vehicleJson.deviceType);
   return {
     ...vehicleJson,
     gpsData,
@@ -308,7 +435,7 @@ const attachGpsData = async (vehicle) => {
  */
 const attachComprehensiveStatus = async (vehicle) => {
   const vehicleJson = vehicle.toJSON();
-  const deviceStatus = await fetchComprehensiveDeviceStatus(vehicleJson.imei);
+  const deviceStatus = await fetchComprehensiveDeviceStatus(vehicleJson.imei, vehicleJson.deviceType);
   return {
     ...vehicleJson,
     deviceStatus,
@@ -348,7 +475,7 @@ const getVehicleById = async (id, clientId) => {
   return await attachGpsData(vehicle);
 };
 
-const addVehicle = async (clientId, { vehicleNumber, chasisNumber, engineNumber, imei }) => {
+const addVehicle = async (clientId, { vehicleNumber, chasisNumber, engineNumber, imei, deviceName, deviceType, serverIp, serverPort, vehicleIcon }) => {
   if (vehicleNumber) {
     const existing = await Vehicle.findOne({ where: { vehicleNumber: vehicleNumber.toUpperCase() } });
     if (existing) {
@@ -369,6 +496,11 @@ const addVehicle = async (clientId, { vehicleNumber, chasisNumber, engineNumber,
     chasisNumber,
     engineNumber,
     imei,
+    deviceName: deviceName || null,
+    deviceType: deviceType || null,
+    serverIp: serverIp || null,
+    serverPort: serverPort ? parseInt(serverPort, 10) : null,
+    vehicleIcon: vehicleIcon || 'car',
   });
 };
 
@@ -518,6 +650,10 @@ const getLocationPlayerData = async (id, clientId, from, to, limit = 10000, skip
 
     console.log(`[Location Player] Fetching data for IMEI: ${vehicle.imei} from ${fromDate} to ${toDate}`);
 
+    // Get correct location model based on device type
+    const LocationModel = getLocationModel(vehicle.deviceType);
+    console.log(`[Location Player] Using ${vehicle.deviceType || 'GT06'} collection`);
+
     // Normalize IMEI - try both with and without leading zero
     const imeiVariations = [
       vehicle.imei,
@@ -529,7 +665,7 @@ const getLocationPlayerData = async (id, clientId, from, to, limit = 10000, skip
     const safeSkip = Math.max(0, parseInt(skip) || 0);
 
     // Get total count for the query (without pagination)
-    const totalRecords = await Location.countDocuments({
+    const totalRecords = await LocationModel.countDocuments({
       imei: { $in: imeiVariations },
       timestamp: {
         $gte: fromDate,
@@ -541,7 +677,7 @@ const getLocationPlayerData = async (id, clientId, from, to, limit = 10000, skip
 
     // Query MongoDB for locations within date range
     // Only select essential fields to minimize data transfer
-    const locations = await Location.find({
+    const locations = await LocationModel.find({
       imei: { $in: imeiVariations },
       timestamp: {
         $gte: fromDate,

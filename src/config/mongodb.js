@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://smartchallan_db_user:8fkvGyui9xhr3w9M@driveinnovate-stage.omkysrq.mongodb.net/test?appName=driveinnovate-stage';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://smartchallan_db_user:8fkvGyui9xhr3w9M@driveinnovate-stage.omkysrq.mongodb.net/di-stage?appName=driveinnovate-stage';
 const MONGODB_PORT = process.env.MONGODB_PORT || '5023';
 
 let isConnected = false;
@@ -84,7 +84,7 @@ const locationSchema = new mongoose.Schema({
   lac: String,
   cellId: String,
 }, { 
-  collection: 'locations',
+  collection: 'gt06locations',
   timestamps: true,
   strict: false // Allow additional fields not in schema
 });
@@ -96,10 +96,95 @@ locationSchema.index({ imei: 1, timestamp: 1 });  // For range queries (location
 
 const Location = mongoose.model('Location', locationSchema);
 
+// FMB125 Location schema for Teltonika FMB125 GPS data
+const fmb125LocationSchema = new mongoose.Schema({
+  imei: { type: String, required: true },
+  deviceType: { type: String, default: 'FMB125' },
+  timestamp: { type: Date, index: true },
+  serverTimestamp: Date,
+  priority: Number,
+  // GPS fields
+  latitude: Number,
+  longitude: Number,
+  altitude: Number,
+  angle: Number,
+  satellites: Number,
+  speed: Number,
+  hdop: Number,
+  pdop: Number,
+  // Fuel monitoring
+  fuelLevel: Number,
+  fuelUsed: Number,
+  fuelRate: Number,
+  fuelSensorVoltage: Number,
+  // Vehicle status
+  ignition: Boolean,
+  movement: Boolean,
+  engineSpeed: Number,
+  engineTemp: Number,
+  engineLoad: Number,
+  engineHours: Number,
+  // Odometer
+  totalOdometer: Number,
+  tripOdometer: Number,
+  // Power & Battery
+  externalVoltage: Number,
+  batteryVoltage: Number,
+  batteryCurrent: Number,
+  batteryLevel: Number,
+  // GSM/Network
+  gsmSignal: Number,
+  cellId: Number,
+  areaCode: Number,
+  operator: String,
+  // Digital I/O
+  digitalInput1: Boolean,
+  digitalInput2: Boolean,
+  digitalInput3: Boolean,
+  digitalOutput1: Boolean,
+  digitalOutput2: Boolean,
+  // Analog inputs
+  analogInput1: Number,
+  analogInput2: Number,
+  // CAN Bus
+  canEngineSpeed: Number,
+  canFuelLevel: Number,
+  canFuelUsed: Number,
+  canMileage: Number,
+  canEngineTemp: Number,
+  canEngineLoad: Number,
+  // Driver
+  iButtonId: String,
+  driverName: String,
+  // Accelerometer
+  axisX: Number,
+  axisY: Number,
+  axisZ: Number,
+  // Event/Alarm
+  eventType: String,
+  alarmType: String,
+  // GPS fix
+  gpsValid: Boolean,
+  // Raw I/O elements
+  ioElements: mongoose.Schema.Types.Mixed,
+  codecType: Number,
+  rawPacket: String,
+}, { 
+  collection: 'fmb125locations',
+  timestamps: true,
+  strict: false
+});
+
+fmb125LocationSchema.index({ imei: 1, timestamp: -1 });
+fmb125LocationSchema.index({ imei: 1, timestamp: 1 });
+
+const FMB125Location = mongoose.model('FMB125Location', fmb125LocationSchema);
+
 module.exports = { 
   connectMongoDB, 
   getMongoDb,
   Location,
+  FMB125Location,
   MONGODB_PORT,
   isMongoDBConnected
 };

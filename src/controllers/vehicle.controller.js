@@ -30,12 +30,12 @@ const getVehicleById = async (req, res) => {
  */
 const addVehicle = async (req, res) => {
   try {
-    const { vehicleNumber, chasisNumber, engineNumber, imei } = req.body;
+    const { vehicleNumber, chasisNumber, engineNumber, imei, deviceName, deviceType, serverIp, serverPort, vehicleIcon } = req.body;
     if (!vehicleNumber && !chasisNumber && !engineNumber && !imei) {
       return res.status(400).json({ success: false, message: 'At least one of vehicleNumber, chasisNumber, engineNumber or imei is required' });
     }
     const vehicle = await vehicleService.addVehicle(req.user.id, {
-      vehicleNumber, chasisNumber, engineNumber, imei,
+      vehicleNumber, chasisNumber, engineNumber, imei, deviceName, deviceType, serverIp, serverPort, vehicleIcon,
     });
     return res.status(201).json({ success: true, message: 'Vehicle registered successfully', data: vehicle });
   } catch (err) {
