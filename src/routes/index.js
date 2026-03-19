@@ -10,6 +10,7 @@ const dashboardRoutes = require('./dashboard.routes');
 const activityRoutes = require('./activity.routes');
 const reportRoutes = require('./report.routes');
 const settingsRoutes = require('./settings.routes');
+const debugRoutes = require('./debug.routes');
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -20,5 +21,6 @@ router.use('/dashboard', dashboardRoutes);
 router.use('/activity', activityRoutes);
 router.use('/reports', reportRoutes);
 router.use('/settings', settingsRoutes);
+router.use('/debug', debugRoutes);
 
 module.exports = router;

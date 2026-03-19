@@ -338,7 +338,6 @@ const fetchFMB125Status = async (LocationModel, imeiVariations) => {
 
     const aggregatedData = {
       deviceType: 'FMB125',
-      
       // GPS Data
       gpsData: {
         latitude: latestRecord.latitude,
@@ -349,9 +348,9 @@ const fetchFMB125Status = async (LocationModel, imeiVariations) => {
         altitude: latestRecord.altitude,
         gpsFixed: latestRecord.gpsValid !== false,
         hdop: latestRecord.hdop,
-        timestamp: latestRecord.timestamp
+        timestamp: latestRecord.timestamp,
+        ioElements: latestRecord.ioElements || {},
       },
-      
       // Device Status
       status: {
         ignition: latestRecord.ignition ?? null,
@@ -367,7 +366,6 @@ const fetchFMB125Status = async (LocationModel, imeiVariations) => {
         door: null,
         gpsTracking: latestRecord.gpsValid ?? null
       },
-      
       // Fuel Data (FMB125 specific)
       fuel: {
         level: latestRecord.fuelLevel ?? latestRecord.canFuelLevel ?? null,
@@ -375,7 +373,6 @@ const fetchFMB125Status = async (LocationModel, imeiVariations) => {
         rate: latestRecord.fuelRate ?? null,
         sensorVoltage: latestRecord.fuelSensorVoltage ?? null
       },
-      
       // Engine Data (FMB125 specific)
       engine: {
         speed: latestRecord.engineSpeed ?? latestRecord.canEngineSpeed ?? null,
@@ -383,26 +380,22 @@ const fetchFMB125Status = async (LocationModel, imeiVariations) => {
         load: latestRecord.engineLoad ?? latestRecord.canEngineLoad ?? null,
         hours: latestRecord.engineHours ?? null
       },
-      
       // Trip Information
       trip: {
         odometer: latestRecord.totalOdometer ? latestRecord.totalOdometer / 1000 : null, // meters to km
         tripOdometer: latestRecord.tripOdometer ? latestRecord.tripOdometer / 1000 : null, // meters to km
         canMileage: latestRecord.canMileage ?? null
       },
-      
       // Alerts
       alerts: {
         latestAlarm: latestRecord.alarmType || latestRecord.eventType || null,
         alarmTimestamp: latestRecord.alarmType ? latestRecord.timestamp : null
       },
-      
       // Driver
       driver: {
         iButtonId: latestRecord.iButtonId ?? null,
         name: latestRecord.driverName ?? null
       },
-      
       // Metadata
       lastUpdate: latestRecord.timestamp,
       priority: latestRecord.priority

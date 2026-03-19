@@ -176,6 +176,10 @@ const login = async ({ email, password, ipAddress, userAgent }) => {
   });
 
   const { password: _, ...userWithoutPassword } = user.toJSON();
+  // Ensure parent_id is present
+  if (typeof user.parent_id !== 'undefined') {
+    userWithoutPassword.parent_id = user.parent_id;
+  }
   return { user: userWithoutPassword, token };
 };
 
