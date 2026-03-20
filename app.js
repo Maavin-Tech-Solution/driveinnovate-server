@@ -11,10 +11,11 @@ const PORT = process.env.PORT || 5000;
 // Middleware
 const allowedOrigins = [
   'http://localhost:5173',
-  'http://localhost:3000/',
-  'http://127.0.0.1:3000/',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
   'https://driveinnovate.in',
-  'https://stage.driveinnovate.in/',
+  'https://www.driveinnovate.in',
+  'https://stage.driveinnovate.in',
 ];
 
 app.use(cors({
