@@ -13,6 +13,11 @@ const Vehicle = sequelize.define(
       type: DataTypes.STRING(100),
       allowNull: true,
     },
+    vehicleName: {
+      type: DataTypes.STRING(200),
+      allowNull: true,
+      comment: 'Friendly display name for the vehicle',
+    },
     chasisNumber: {
       type: DataTypes.STRING(100),
       allowNull: true,
@@ -68,6 +73,18 @@ const Vehicle = sequelize.define(
       type: DataTypes.STRING(50),
       allowNull: true,
       defaultValue: 'car',
+    },
+    idleThreshold: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 5,
+      comment: 'Minutes of engine-off before closing a trip (traffic vs parking)',
+    },
+    fuelFillThreshold: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 5,
+      comment: 'Minimum fuel % increase to count as a fill event',
     },
   },
   {

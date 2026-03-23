@@ -42,12 +42,12 @@ const Trip = sequelize.define('Trip', {
   },
   startLatitude: {
     type: DataTypes.DECIMAL(10, 8),
-    allowNull: false,
+    allowNull: true,
     field: 'start_latitude'
   },
   startLongitude: {
     type: DataTypes.DECIMAL(11, 8),
-    allowNull: false,
+    allowNull: true,
     field: 'start_longitude'
   },
   startLocation: {
@@ -57,12 +57,12 @@ const Trip = sequelize.define('Trip', {
   },
   endLatitude: {
     type: DataTypes.DECIMAL(10, 8),
-    allowNull: false,
+    allowNull: true,
     field: 'end_latitude'
   },
   endLongitude: {
     type: DataTypes.DECIMAL(11, 8),
-    allowNull: false,
+    allowNull: true,
     field: 'end_longitude'
   },
   endLocation: {

@@ -11,6 +11,7 @@ const activityRoutes = require('./activity.routes');
 const reportRoutes = require('./report.routes');
 const settingsRoutes = require('./settings.routes');
 const debugRoutes = require('./debug.routes');
+const groupRoutes = require('./group.routes');
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -22,5 +23,6 @@ router.use('/activity', activityRoutes);
 router.use('/reports', reportRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/debug', debugRoutes);
+router.use('/groups', groupRoutes);
 
 module.exports = router;

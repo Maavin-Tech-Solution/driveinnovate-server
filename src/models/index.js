@@ -10,6 +10,12 @@ const AuthOtp = require('./AuthOtp');
 const SpeedViolation = require('./SpeedViolation');
 const Trip = require('./Trip');
 const Stop = require('./Stop');
+const VehicleSensor = require('./VehicleSensor');
+const VehicleEngineSession = require('./VehicleEngineSession');
+const VehicleFuelEvent = require('./VehicleFuelEvent');
+const VehicleDeviceState = require('./VehicleDeviceState');
+const VehicleGroup = require('./VehicleGroup');
+const VehicleGroupMember = require('./VehicleGroupMember');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -45,6 +51,31 @@ Trip.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 Vehicle.hasMany(Stop, { foreignKey: 'vehicleId', as: 'stops' });
 Stop.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 
+Vehicle.hasMany(VehicleSensor, { foreignKey: 'vehicleId', as: 'sensors' });
+VehicleSensor.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+Vehicle.hasMany(VehicleEngineSession, { foreignKey: 'vehicleId', as: 'engineSessions' });
+VehicleEngineSession.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+Vehicle.hasMany(VehicleFuelEvent, { foreignKey: 'vehicleId', as: 'fuelEvents' });
+VehicleFuelEvent.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+Vehicle.hasOne(VehicleDeviceState, { foreignKey: 'vehicleId', as: 'deviceState' });
+VehicleDeviceState.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+// Vehicle Groups
+User.hasMany(VehicleGroup, { foreignKey: 'clientId', as: 'vehicleGroups' });
+VehicleGroup.belongsTo(User, { foreignKey: 'clientId', as: 'owner' });
+
+VehicleGroup.hasMany(VehicleGroupMember, { foreignKey: 'groupId', as: 'members' });
+VehicleGroupMember.belongsTo(VehicleGroup, { foreignKey: 'groupId', as: 'group' });
+
+Vehicle.hasMany(VehicleGroupMember, { foreignKey: 'vehicleId', as: 'groupMemberships' });
+VehicleGroupMember.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+VehicleGroup.belongsToMany(Vehicle, { through: VehicleGroupMember, foreignKey: 'groupId', otherKey: 'vehicleId', as: 'vehicles' });
+Vehicle.belongsToMany(VehicleGroup, { through: VehicleGroupMember, foreignKey: 'vehicleId', otherKey: 'groupId', as: 'groups' });
+
 module.exports = {
   UserSettings,
   sequelize,
@@ -58,4 +89,10 @@ module.exports = {
   SpeedViolation,
   Trip,
   Stop,
+  VehicleSensor,
+  VehicleEngineSession,
+  VehicleFuelEvent,
+  VehicleDeviceState,
+  VehicleGroup,
+  VehicleGroupMember,
 };
