@@ -16,6 +16,10 @@ const VehicleFuelEvent = require('./VehicleFuelEvent');
 const VehicleDeviceState = require('./VehicleDeviceState');
 const VehicleGroup = require('./VehicleGroup');
 const VehicleGroupMember = require('./VehicleGroupMember');
+const TripShare = require('./TripShare');
+const Alert = require('./Alert');
+const Notification = require('./Notification');
+const SupportTicket = require('./SupportTicket');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -63,6 +67,29 @@ VehicleFuelEvent.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 Vehicle.hasOne(VehicleDeviceState, { foreignKey: 'vehicleId', as: 'deviceState' });
 VehicleDeviceState.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 
+// Support Tickets
+User.hasMany(SupportTicket, { foreignKey: 'clientId', as: 'supportTickets' });
+SupportTicket.belongsTo(User, { foreignKey: 'clientId', as: 'client' });
+
+Vehicle.hasMany(SupportTicket, { foreignKey: 'vehicleId', as: 'supportTickets' });
+SupportTicket.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+// Alerts & Notifications
+User.hasMany(Alert, { foreignKey: 'clientId', as: 'alerts' });
+Alert.belongsTo(User, { foreignKey: 'clientId', as: 'client' });
+
+Alert.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+Vehicle.hasMany(Alert, { foreignKey: 'vehicleId', as: 'vehicleAlerts' });
+
+Alert.hasMany(Notification, { foreignKey: 'alertId', as: 'notifications' });
+Notification.belongsTo(Alert, { foreignKey: 'alertId', as: 'alert' });
+
+User.hasMany(Notification, { foreignKey: 'clientId', as: 'notifications' });
+Notification.belongsTo(User, { foreignKey: 'clientId', as: 'client' });
+
+Vehicle.hasMany(Notification, { foreignKey: 'vehicleId', as: 'notifications' });
+Notification.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
 // Vehicle Groups
 User.hasMany(VehicleGroup, { foreignKey: 'clientId', as: 'vehicleGroups' });
 VehicleGroup.belongsTo(User, { foreignKey: 'clientId', as: 'owner' });
@@ -95,4 +122,8 @@ module.exports = {
   VehicleDeviceState,
   VehicleGroup,
   VehicleGroupMember,
+  TripShare,
+  Alert,
+  Notification,
+  SupportTicket,
 };

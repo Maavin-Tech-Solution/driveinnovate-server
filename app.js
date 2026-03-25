@@ -1,10 +1,13 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const { sequelize } = require('./src/models');
 const routes = require('./src/routes');
+const mongoose = require('mongoose');
 const { connectMongoDB, getMongoDb } = require('./src/config/mongodb');
 const { processPacket } = require('./src/services/packetProcessor.service');
+const { startAlertEngine } = require('./src/services/alertEngine.service');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -17,6 +20,7 @@ const allowedOrigins = [
   'https://driveinnovate.in',
   'https://www.driveinnovate.in',
   'https://stage.driveinnovate.in',
+  'http://localhost:61878'
 ];
 
 const corsOptions = {
@@ -36,6 +40,9 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions)); // handle preflight for all routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve uploaded support attachments as static files
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
 app.use('/api', routes);
@@ -78,6 +85,7 @@ sequelize
   .then(() => {
     app.listen(PORT, () => {
       console.log(`DriveInnovate Server running on port ${PORT}`);
+      startAlertEngine();
     });
   })
   .catch((err) => {
@@ -102,34 +110,48 @@ function startChangeStreams() {
 }
 
 function watchCollection(colName, deviceType, retryMs = 5000) {
+  let stream;
   try {
     const db = getMongoDb();
     if (!db) return; // MongoDB not connected
 
     const col = db.collection(colName);
-    const stream = col.watch([{ $match: { operationType: 'insert' } }], {
+    stream = col.watch([{ $match: { operationType: 'insert' } }], {
       fullDocument: 'updateLookup',
     });
 
     stream.on('change', async (event) => {
       const doc = event.fullDocument;
       if (doc) {
-        console.log(`[ChangeStream:${colName}] insert imei=${doc.imei} keys=${Object.keys(doc).join(',')}`);
+        console.log(`[ChangeStream:${colName}] insert imei=${doc.imei}`);
         await processPacket(doc, deviceType).catch((err) =>
           console.error(`[ChangeStream:${colName}] processPacket error:`, err.message)
         );
       }
     });
 
-    stream.on('error', (err) => {
-      console.warn(`[ChangeStream:${colName}] Error, retrying in ${retryMs / 1000}s:`, err.message);
-      stream.close();
-      setTimeout(() => watchCollection(colName, deviceType, Math.min(retryMs * 2, 60000)), retryMs);
+    const scheduleRetry = (err) => {
+      const wait = Math.min(retryMs * 2, 60000);
+      console.warn(`[ChangeStream:${colName}] ${err.message} — retrying in ${wait / 1000}s`);
+      // Close cleanly before retry so the connection returns to the pool
+      stream.close().catch(() => {});
+      setTimeout(() => watchCollection(colName, deviceType, wait), wait);
+    };
+
+    stream.on('error', scheduleRetry);
+
+    // Atlas change streams can go 'closed' without emitting 'error' on network timeout
+    stream.on('close', () => {
+      // Only retry if Mongoose is still connected (avoid retry storm on intentional shutdown)
+      if (mongoose.connection.readyState === 1) {
+        scheduleRetry(new Error('stream closed unexpectedly'));
+      }
     });
 
     console.log(`✓ Change stream watching ${colName} (${deviceType})`);
   } catch (err) {
-    console.warn(`[ChangeStream:${colName}] Failed to start, retrying:`, err.message);
+    console.warn(`[ChangeStream:${colName}] Failed to start:`, err.message);
+    if (stream) stream.close().catch(() => {});
     setTimeout(() => watchCollection(colName, deviceType, Math.min(retryMs * 2, 60000)), retryMs);
   }
 }

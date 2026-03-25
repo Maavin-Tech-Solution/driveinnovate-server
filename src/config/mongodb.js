@@ -13,9 +13,15 @@ const connectMongoDB = async () => {
 
   try {
     await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+      serverSelectionTimeoutMS: 15000, // Atlas needs longer: 15s
       socketTimeoutMS: 45000,
-      bufferCommands: false, // Disable buffering - fail fast if not connected
+      connectTimeoutMS: 15000,
+      heartbeatFrequencyMS: 10000,     // Probe server every 10s; keeps connections alive
+      maxPoolSize: 10,                 // Don't exhaust Atlas connection quota
+      minPoolSize: 2,                  // Keep 2 connections warm to avoid cold-start timeouts
+      maxIdleTimeMS: 45000,            // Retire idle connections before NAT/firewall kills them (~60s)
+      family: 4,                       // Force IPv4; avoids IPv6 DNS resolution delays on Atlas
+      // bufferCommands defaults to true — let Mongoose queue ops during brief reconnects
     });
     isConnected = true;
     console.log('MongoDB connected successfully');

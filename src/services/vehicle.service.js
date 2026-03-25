@@ -368,10 +368,21 @@ const fetchFMB125Status = async (LocationModel, imeiVariations) => {
       },
       // Fuel Data (FMB125 specific)
       fuel: {
+        // CAN bus fuel level (percentage 0-100) — IO element 112
         level: latestRecord.fuelLevel ?? latestRecord.canFuelLevel ?? null,
-        used: latestRecord.fuelUsed ?? latestRecord.canFuelUsed ?? null,
-        rate: latestRecord.fuelRate ?? null,
-        sensorVoltage: latestRecord.fuelSensorVoltage ?? null
+        // LLS liquid level sensor fuel (mm) — IO elements 201/203/210/212/214
+        llsLevel: latestRecord.llsFuelLevel1 ?? latestRecord.llsFuelLevel2 ??
+                  latestRecord.llsFuelLevel3 ?? latestRecord.llsFuelLevel4 ??
+                  latestRecord.llsFuelLevel5 ?? null,
+        llsLevel1: latestRecord.llsFuelLevel1 ?? null,
+        llsLevel2: latestRecord.llsFuelLevel2 ?? null,
+        // Ultrasonic sensor fuel level (mm) — IO element 327
+        ulLevel: latestRecord.ulFuelLevel ?? null,
+        // Analog input 1 voltage (mV) — IO element 9 (resistive sensor)
+        sensorVoltage: latestRecord.fuelSensorVoltage ?? latestRecord.analogInput1 ?? null,
+        // GPS-calculated fuel usage
+        used: latestRecord.fuelUsed ?? latestRecord.canFuelUsed ?? latestRecord.fuelUsedGps ?? null,
+        rate: latestRecord.fuelRate ?? latestRecord.fuelRateGps ?? null,
       },
       // Engine Data (FMB125 specific)
       engine: {

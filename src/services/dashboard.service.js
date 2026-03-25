@@ -1,4 +1,4 @@
-const { Vehicle, Challan, RtoDetail } = require('../models');
+const { Vehicle, Challan, RtoDetail, VehicleGroup } = require('../models');
 const { Op } = require('sequelize');
 const { Location } = require('../config/mongodb');
 
@@ -33,20 +33,39 @@ const getStats = async (userId) => {
 };
 
 const getUserStats = async (userId) => {
-  const [totalRegisteredVehicles, activeVehicles, inactiveVehicles, deletedVehicles] = await Promise.all([
-    Vehicle.count({ where: { clientId: userId } }),
-    Vehicle.count({ where: { clientId: userId, status: 'active' } }),
-    Vehicle.count({ where: { clientId: userId, status: 'inactive' } }),
-    Vehicle.count({ where: { clientId: userId, status: 'deleted' } }),
-  ]);
+  const vehicles = await Vehicle.findAll({ where: { clientId: userId }, attributes: ['id', 'status'] });
+  const vehicleIds = vehicles.map((v) => v.id);
+
+  const activeVehicles   = vehicles.filter((v) => v.status === 'active').length;
+  const inactiveVehicles = vehicles.filter((v) => v.status === 'inactive').length;
+  const deletedVehicles  = vehicles.filter((v) => v.status === 'deleted').length;
+
+  const [pendingChallans, upcomingRenewals] = vehicleIds.length
+    ? await Promise.all([
+        Challan.count({ where: { vehicleId: { [Op.in]: vehicleIds }, status: 'pending' } }),
+        RtoDetail.count({
+          where: {
+            vehicleId: { [Op.in]: vehicleIds },
+            [Op.or]: [
+              { insuranceExpiry: { [Op.lt]: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } },
+              { roadTaxExpiry:   { [Op.lt]: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } },
+              { fitnessExpiry:   { [Op.lt]: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } },
+              { pollutionExpiry: { [Op.lt]: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } },
+            ],
+          },
+        }),
+      ])
+    : [0, 0];
 
   return {
-    registeredVehicles: totalRegisteredVehicles,
+    registeredVehicles: vehicles.length,
     vehicleStatusWise: {
       active: activeVehicles,
       inactive: inactiveVehicles,
       deleted: deletedVehicles,
     },
+    pendingChallans,
+    upcomingRenewals,
   };
 };
 

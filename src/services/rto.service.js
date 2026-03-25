@@ -2,12 +2,12 @@ const { RtoDetail, Vehicle } = require('../models');
 
 const getRtoDetails = async (userId) => {
   return RtoDetail.findAll({
-    include: [{ model: Vehicle, as: 'vehicle', where: { userId }, attributes: ['vehicleNumber', 'name', 'deviceType'] }],
+    include: [{ model: Vehicle, as: 'vehicle', where: { clientId: userId }, attributes: ['vehicleNumber', 'vehicleName', 'deviceType'] }],
   });
 };
 
 const getRtoByVehicle = async (vehicleId, userId) => {
-  const vehicle = await Vehicle.findOne({ where: { id: vehicleId, userId } });
+  const vehicle = await Vehicle.findOne({ where: { id: vehicleId, clientId: userId } });
   if (!vehicle) {
     const err = new Error('Vehicle not found');
     err.status = 404;
@@ -23,7 +23,7 @@ const getRtoByVehicle = async (vehicleId, userId) => {
 };
 
 const createRtoDetail = async (userId, data) => {
-  const vehicle = await Vehicle.findOne({ where: { id: data.vehicleId, userId } });
+  const vehicle = await Vehicle.findOne({ where: { id: data.vehicleId, clientId: userId } });
   if (!vehicle) {
     const err = new Error('Vehicle not found');
     err.status = 404;
@@ -39,7 +39,7 @@ const createRtoDetail = async (userId, data) => {
 };
 
 const updateRtoDetail = async (vehicleId, userId, data) => {
-  const vehicle = await Vehicle.findOne({ where: { id: vehicleId, userId } });
+  const vehicle = await Vehicle.findOne({ where: { id: vehicleId, clientId: userId } });
   if (!vehicle) {
     const err = new Error('Vehicle not found');
     err.status = 404;

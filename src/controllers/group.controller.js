@@ -10,6 +10,16 @@ const getGroups = async (req, res) => {
   }
 };
 
+/** GET /api/groups/:id */
+const getGroupById = async (req, res) => {
+  try {
+    const group = await groupService.getGroupById(req.params.id, req.user.id);
+    return res.json({ success: true, data: group });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
 /** POST /api/groups */
 const createGroup = async (req, res) => {
   try {
@@ -69,4 +79,59 @@ const removeVehicleFromGroup = async (req, res) => {
   }
 };
 
-module.exports = { getGroups, createGroup, updateGroup, deleteGroup, addVehicleToGroup, removeVehicleFromGroup };
+/** GET /api/groups/:id/report/summary?from=YYYY-MM-DD&to=YYYY-MM-DD */
+const getGroupReportSummary = async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!from || !to) {
+      return res.status(400).json({ success: false, message: 'from and to query params are required' });
+    }
+    const data = await groupService.getGroupReportSummary(req.params.id, req.user.id, from, to);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+/** GET /api/groups/:id/report/trips?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=50&offset=0 */
+const getGroupReportTrips = async (req, res) => {
+  try {
+    const { from, to, limit, offset } = req.query;
+    if (!from || !to) {
+      return res.status(400).json({ success: false, message: 'from and to query params are required' });
+    }
+    const data = await groupService.getGroupReportTrips(req.params.id, req.user.id, from, to, limit, offset);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+/** GET /api/groups/:id/report/export-xlsx */
+const exportGroupReport = async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ success: false, message: 'from and to are required' });
+    const buffer = await groupService.exportGroupReportExcel(req.params.id, req.user.id, from, to);
+    const group  = await groupService.getGroupById(req.params.id, req.user.id);
+    const name   = group?.name?.replace(/\s+/g, '_') || req.params.id;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="group_${name}_${from}_${to}.xlsx"`);
+    return res.send(buffer);
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = {
+  getGroups,
+  getGroupById,
+  createGroup,
+  updateGroup,
+  deleteGroup,
+  addVehicleToGroup,
+  removeVehicleFromGroup,
+  getGroupReportSummary,
+  getGroupReportTrips,
+  exportGroupReport,
+};
