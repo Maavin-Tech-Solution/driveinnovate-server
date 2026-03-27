@@ -52,6 +52,18 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', message: 'DriveInnovate Server is running', timestamp: new Date() });
 });
 
+// Serve React build + SPA fallback (production only — skipped when dist doesn't exist in dev)
+const clientDist = path.join(__dirname, '../client/dist');
+const fs = require('fs');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  // All non-API routes (including /share/:token, /my-fleet, etc.) serve index.html
+  // so React Router can handle client-side navigation on direct URL access
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+}
+
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
