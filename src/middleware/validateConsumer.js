@@ -1,5 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { User } = require('../models');
+const { resolveUserRole } = require('../services/auth.service');
+const { getPermissions } = require('../services/permission.service');
 
 const validateConsumer = async (req, res, next) => {
   try {
@@ -32,7 +34,10 @@ const validateConsumer = async (req, res, next) => {
       });
     }
 
-    req.user = user;
+    // Attach role + full network IDs + permissions so every route can scope data correctly
+    const roleData = await resolveUserRole(user);
+    const permissions = await getPermissions(user);
+    req.user = Object.assign(user, roleData, { permissions });
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {

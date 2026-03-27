@@ -100,4 +100,17 @@ const createClient = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient };
+/**
+ * GET /api/users/clients
+ * List direct children (clients/dealers) of the current user.
+ */
+const listClients = async (req, res) => {
+  try {
+    const clients = await userService.listClients(req.user.id);
+    return res.json({ success: true, data: clients });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients };

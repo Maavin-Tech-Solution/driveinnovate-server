@@ -102,4 +102,14 @@ const createClient = async (
   return clientWithoutPassword;
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient };
+const listClients = async (parentUserId) => {
+  const clients = await User.findAll({
+    where: { parentId: parentUserId },
+    attributes: { exclude: ['password'] },
+    include: [{ model: UserMeta, as: 'meta', required: false }],
+    order: [['created_at', 'DESC']],
+  });
+  return clients;
+};
+
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients };

@@ -4,11 +4,53 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { Op, UniqueConstraintError } = require('sequelize');
 const { User, UserMeta, UserActivity, AuthOtp } = require('../models');
+const { getPermissions } = require('./permission.service');
 
 const OTP_EXPIRY_MINUTES = Number(process.env.OTP_EXPIRY_MINUTES || 10);
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || 5);
 
 const generateOtp = () => `${Math.floor(100000 + Math.random() * 900000)}`;
+
+/**
+ * BFS to collect all descendant user IDs under rootId.
+ * Uses batched IN-queries so depth=2 hierarchy = 2 SQL calls max.
+ */
+const getAllDescendants = async (rootId) => {
+  const descendants = [];
+  let batch = [rootId];
+  while (batch.length > 0) {
+    const children = await User.findAll({
+      where: { parentId: batch },
+      attributes: ['id'],
+      raw: true,
+    });
+    if (!children.length) break;
+    const childIds = children.map(c => c.id);
+    descendants.push(...childIds);
+    batch = childIds;
+  }
+  return descendants;
+};
+
+/**
+ * Determine role + network for a user:
+ *   papa   — parentId === 0 (top-level account)
+ *   dealer — has children but parentId != 0
+ *   client — no children
+ * clientIds includes the user's own id + all descendant ids.
+ */
+const resolveUserRole = async (user) => {
+  if (Number(user.parentId) === 0) {
+    const descendants = await getAllDescendants(user.id);
+    return { role: 'papa', hasClients: true, clientIds: [user.id, ...descendants] };
+  }
+  const childCount = await User.count({ where: { parentId: user.id } });
+  if (childCount > 0) {
+    const descendants = await getAllDescendants(user.id);
+    return { role: 'dealer', hasClients: true, clientIds: [user.id, ...descendants] };
+  }
+  return { role: 'client', hasClients: false, clientIds: [user.id] };
+};
 
 const hashOtp = (otp) => crypto.createHash('sha256').update(String(otp)).digest('hex');
 
@@ -171,16 +213,17 @@ const login = async ({ email, password, ipAddress, userAgent }) => {
     status: 'success',
   });
 
-  const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-  });
+  const roleData = await resolveUserRole(user);
+  const permissions = await getPermissions(user);
+
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: roleData.role },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
 
   const { password: _, ...userWithoutPassword } = user.toJSON();
-  // Ensure parent_id is present
-  if (typeof user.parent_id !== 'undefined') {
-    userWithoutPassword.parent_id = user.parent_id;
-  }
-  return { user: userWithoutPassword, token };
+  return { user: { ...userWithoutPassword, ...roleData, permissions }, token };
 };
 
 const requestLoginOtp = async ({ email, ipAddress, userAgent }) => {
@@ -271,12 +314,17 @@ const verifyLoginOtp = async ({ email, otp, ipAddress, userAgent }) => {
     status: 'success',
   });
 
-  const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-  });
+  const roleData = await resolveUserRole(user);
+  const permissions = await getPermissions(user);
+
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: roleData.role },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
 
   const { password: _, ...userWithoutPassword } = user.toJSON();
-  return { user: userWithoutPassword, token };
+  return { user: { ...userWithoutPassword, ...roleData, permissions }, token };
 };
 
 const requestForgotPasswordOtp = async ({ email, ipAddress, userAgent }) => {
@@ -373,4 +421,5 @@ module.exports = {
   verifyLoginOtp,
   requestForgotPasswordOtp,
   resetPasswordWithOtp,
+  resolveUserRole,
 };
