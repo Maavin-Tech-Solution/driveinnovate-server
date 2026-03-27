@@ -20,6 +20,8 @@ const TripShare = require('./TripShare');
 const Alert = require('./Alert');
 const Notification = require('./Notification');
 const SupportTicket = require('./SupportTicket');
+const Geofence = require('./Geofence');
+const GeofenceAssignment = require('./GeofenceAssignment');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -90,6 +92,19 @@ Notification.belongsTo(User, { foreignKey: 'clientId', as: 'client' });
 Vehicle.hasMany(Notification, { foreignKey: 'vehicleId', as: 'notifications' });
 Notification.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 
+// Geofences
+User.hasMany(Geofence, { foreignKey: 'clientId', as: 'geofences' });
+Geofence.belongsTo(User, { foreignKey: 'clientId', as: 'client' });
+
+Geofence.hasMany(GeofenceAssignment, { foreignKey: 'geofenceId', as: 'assignments' });
+GeofenceAssignment.belongsTo(Geofence, { foreignKey: 'geofenceId', as: 'geofence' });
+
+GeofenceAssignment.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+Vehicle.hasMany(GeofenceAssignment, { foreignKey: 'vehicleId', as: 'geofenceAssignments' });
+
+GeofenceAssignment.belongsTo(VehicleGroup, { foreignKey: 'groupId', as: 'group' });
+VehicleGroup.hasMany(GeofenceAssignment, { foreignKey: 'groupId', as: 'geofenceAssignments' });
+
 // Vehicle Groups
 User.hasMany(VehicleGroup, { foreignKey: 'clientId', as: 'vehicleGroups' });
 VehicleGroup.belongsTo(User, { foreignKey: 'clientId', as: 'owner' });
@@ -126,4 +141,6 @@ module.exports = {
   Alert,
   Notification,
   SupportTicket,
+  Geofence,
+  GeofenceAssignment,
 };

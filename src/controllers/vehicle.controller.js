@@ -127,4 +127,18 @@ const getLocationPlayerData = async (req, res) => {
   }
 };
 
-module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData };
+/**
+ * GET /api/vehicles/live-positions
+ * Lightweight: returns current lat/lng/speed/engineOn for all user vehicles
+ * from VehicleDeviceState (MySQL only — no MongoDB). Used for map auto-refresh.
+ */
+const getLivePositions = async (req, res) => {
+  try {
+    const data = await vehicleService.getLivePositions(req.user.id, req.query.since);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions };

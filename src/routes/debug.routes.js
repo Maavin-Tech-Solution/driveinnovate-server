@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { getDataPackets } = require('../controllers/debug.controller');
+const { getDataPackets, getVehicleStatus } = require('../controllers/debug.controller');
 
-// GET /api/debug/data-packets
 router.get('/data-packets', getDataPackets);
+router.get('/vehicle-status', getVehicleStatus);
 
 module.exports = router;

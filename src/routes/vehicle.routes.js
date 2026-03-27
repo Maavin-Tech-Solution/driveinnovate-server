@@ -8,6 +8,9 @@ const validateConsumer = require('../middleware/validateConsumer');
 // GET /api/vehicles - list all vehicles for user
 router.get('/', validateConsumer, vehicleController.getVehicles);
 
+// GET /api/vehicles/live-positions - fast lat/lng/engineOn for map auto-refresh (MySQL only)
+router.get('/live-positions', validateConsumer, vehicleController.getLivePositions);
+
 // GET /api/vehicles/:id - get vehicle by id
 router.get('/:id', validateConsumer, vehicleController.getVehicleById);
 

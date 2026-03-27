@@ -55,16 +55,40 @@ function overlappingStopsWhere(vehicleId, from, to) {
 }
 
 /**
- * Clip a stop's contribution (in seconds) to the window [from, to].
- * Stops that span beyond the window are counted only for the portion
- * that falls inside — prevents a 26-hour stop from inflating a 24-hour day.
+ * Merge overlapping/duplicate parking stop intervals into non-overlapping
+ * periods, clipped to [from, to].
+ *
+ * Returns an array of { s, e } (milliseconds) representing distinct parking
+ * windows. Summing (e - s) gives the true parked duration without
+ * double-counting stops that were created for the same physical period
+ * (e.g. from spurious trips caused by GPS speed drift).
  */
-function clipStopSecs(stop, from, to) {
-  const s = Math.max(new Date(stop.startTime).getTime(), from.getTime());
-  const e = stop.endTime
-    ? Math.min(new Date(stop.endTime).getTime(), to.getTime())
-    : Math.min(Date.now(), to.getTime());
-  return Math.max(0, Math.floor((e - s) / 1000));
+function mergeStopIntervals(stops, from, to) {
+  const fromMs = from.getTime();
+  const toMs   = to.getTime();
+  const nowMs  = Date.now();
+
+  const intervals = stops
+    .map(p => ({
+      s: Math.max(new Date(p.startTime).getTime(), fromMs),
+      e: p.endTime
+        ? Math.min(new Date(p.endTime).getTime(), toMs)
+        : Math.min(nowMs, toMs),
+    }))
+    .filter(i => i.e > i.s)
+    .sort((a, b) => a.s - b.s);
+
+  if (!intervals.length) return [];
+
+  const merged = [];
+  let { s: curS, e: curE } = intervals[0];
+  for (let i = 1; i < intervals.length; i++) {
+    const { s, e } = intervals[i];
+    if (s <= curE) { curE = Math.max(curE, e); }
+    else { merged.push({ s: curS, e: curE }); curS = s; curE = e; }
+  }
+  merged.push({ s: curS, e: curE });
+  return merged;
 }
 
 async function getVehicle(vehicleId) {
@@ -111,7 +135,8 @@ async function getSummary(vehicleId, from, to) {
   const avgSpeed = speedTrips.length
     ? speedTrips.reduce((s, t) => s + parseFloat(t.avgSpeed), 0) / speedTrips.length
     : 0;
-  const parkingSecs = parkingStops.reduce((s, p) => s + clipStopSecs(p, from, to), 0);
+  const mergedParking = mergeStopIntervals(parkingStops, from, to);
+  const parkingSecs = mergedParking.reduce((s, i) => s + Math.floor((i.e - i.s) / 1000), 0);
   const totalFilled = fuelFills.reduce((s, f) => s + parseFloat(f.fuelChangePct || 0), 0);
   const totalDrained = fuelDrains.reduce((s, f) => s + parseFloat(f.fuelChangePct || 0), 0);
   const totalConsumed = trips.reduce((s, t) => s + parseFloat(t.fuelConsumed || 0), 0);
@@ -129,7 +154,7 @@ async function getSummary(vehicleId, from, to) {
     avgSpeedInTrips: parseFloat(avgSpeed.toFixed(6)),
     parkingTime: secsToHMS(parkingSecs),
     parkingTimeSecs: parkingSecs,
-    parkingsCount: parkingStops.length,
+    parkingsCount: mergedParking.length,
     totalFilled: parseFloat(totalFilled.toFixed(2)),
     totalFillings: fuelFills.length,
     totalDrained: parseFloat(totalDrained.toFixed(2)),
@@ -173,39 +198,31 @@ async function getDailyStats(vehicleId, from, to) {
     if (dayMap[k].fuelStart === null) dayMap[k].fuelStart = parseFloat(e.startFuelLevel || 0);
     dayMap[k].fuelEnd = parseFloat(e.endFuelLevel ?? dayMap[k].fuelEnd ?? 0);
   });
-  parkingStops.forEach(p => {
-    // Distribute the stop across every IST calendar day it spans.
-    // A stop starting on March 21 and lasting 26 hrs contributes to both
-    // March 21 AND March 22, clipped to the exact seconds per day.
-    const stopStart = new Date(p.startTime).getTime();
-    const stopEnd   = p.endTime
-      ? new Date(p.endTime).getTime()
-      : Math.min(Date.now(), to.getTime());
-
-    // Walk through IST days from the stop's start to its end
+  // Merge overlapping stops before distributing — prevents double-counting
+  // when multiple stop rows cover the same parking period.
+  mergeStopIntervals(parkingStops, from, to).forEach(({ s: stopStart, e: stopEnd }) => {
+    // Distribute the merged interval across every IST calendar day it spans.
     let cursor = stopStart;
     let counted = false;
     while (cursor < stopEnd) {
-      // Find the IST day containing `cursor`
       const istCursor   = new Date(cursor + IST_OFFSET_MS);
       const istDayStart = new Date(Date.UTC(
         istCursor.getUTCFullYear(), istCursor.getUTCMonth(), istCursor.getUTCDate()
-      ) - IST_OFFSET_MS); // midnight IST in UTC
-      const istDayEnd   = new Date(istDayStart.getTime() + 24 * 60 * 60 * 1000); // next midnight IST
+      ) - IST_OFFSET_MS);
+      const istDayEnd   = new Date(istDayStart.getTime() + 24 * 60 * 60 * 1000);
 
-      // Clip to both the query range and this IST day
-      const sliceStart = Math.max(cursor,       from.getTime(), istDayStart.getTime());
-      const sliceEnd   = Math.min(stopEnd, to.getTime(), istDayEnd.getTime());
+      const sliceStart = Math.max(cursor,     from.getTime(), istDayStart.getTime());
+      const sliceEnd   = Math.min(stopEnd, to.getTime(),   istDayEnd.getTime());
       const sliceSecs  = Math.max(0, Math.floor((sliceEnd - sliceStart) / 1000));
 
       if (sliceSecs > 0) {
-        const k = dayKey(sliceStart); // IST date key for this slice
+        const k = dayKey(sliceStart);
         ensureDay(k);
         dayMap[k].parkingSecs += sliceSecs;
         if (!counted) { dayMap[k].parkingCount += 1; counted = true; }
       }
 
-      cursor = istDayEnd.getTime(); // advance to next IST day
+      cursor = istDayEnd.getTime();
     }
   });
   fills.forEach(f => {

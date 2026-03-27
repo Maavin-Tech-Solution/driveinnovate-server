@@ -1,5 +1,7 @@
-const { Vehicle, RtoDetail, User } = require('../models');
+const { Vehicle, RtoDetail, User, VehicleDeviceState } = require('../models');
+const { Op } = require('sequelize');
 const { Location, FMB125Location, isMongoDBConnected } = require('../config/mongodb');
+const { invalidateVehicleCache } = require('./packetProcessor.service');
 
 // FMB125 device types that should use fmb125locations collection
 const FMB125_DEVICE_TYPES = ['FMB125', 'FMB120', 'FMB130', 'FMB140', 'FMB920'];
@@ -110,9 +112,12 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
     
     // ── GT06 packet-based fetch (existing logic) ──
     // Fetch latest packets of each important type in parallel
-    const [locationData, locationExtData, statusData, heartbeatData, odometerData, voltageData, alarmData] = await Promise.all([
+    // The last entry is a catch-all: absolute latest packet regardless of type,
+    // used to ensure lastUpdate / gpsData.timestamp always reflects the true
+    // last communication even when recent packets have an unexpected packetType.
+    const [locationData, locationExtData, statusData, heartbeatData, odometerData, voltageData, alarmData, absoluteLatest, latestGps] = await Promise.all([
       // LOCATION (0x12) - Basic GPS location with ignition
-      Location.findOne({ 
+      Location.findOne({
         imei: { $in: imeiVariations },
         packetType: 'LOCATION',
         latitude: { $exists: true, $ne: null },
@@ -121,36 +126,36 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
         .sort({ timestamp: -1 })
         .select('timestamp latitude longitude speed satellites course acc gpsFixed')
         .lean(),
-      
+
       // LOCATION_EXT (0x22) - Extended location with defense, charge status
-      Location.findOne({ 
+      Location.findOne({
         imei: { $in: imeiVariations },
         packetType: 'LOCATION_EXT'
       })
         .sort({ timestamp: -1 })
         .select('timestamp latitude longitude speed satellites acc defense charge gsmSignal')
         .lean(),
-      
+
       // STATUS (0x13) - Comprehensive device status
-      Location.findOne({ 
+      Location.findOne({
         imei: { $in: imeiVariations },
         packetType: 'STATUS'
       })
         .sort({ timestamp: -1 })
         .select('timestamp oil electric door acc defense gpsTracking batteryLevel gsmSignal alarm')
         .lean(),
-      
+
       // HEARTBEAT (0x23) - Voltage and signal
-      Location.findOne({ 
+      Location.findOne({
         imei: { $in: imeiVariations },
         packetType: 'HEARTBEAT'
       })
         .sort({ timestamp: -1 })
         .select('timestamp voltage gsmSignal terminalInfo')
         .lean(),
-      
+
       // INFO_TRANSMISSION (0x94) with infoType 0x01 - Odometer
-      Location.findOne({ 
+      Location.findOne({
         imei: { $in: imeiVariations },
         packetType: 'INFO_TRANSMISSION',
         odometer: { $exists: true, $ne: null }
@@ -158,9 +163,9 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
         .sort({ timestamp: -1 })
         .select('timestamp odometer')
         .lean(),
-      
+
       // INFO_TRANSMISSION (0x94) with infoType 0x05 - Voltage
-      Location.findOne({ 
+      Location.findOne({
         imei: { $in: imeiVariations },
         packetType: 'INFO_TRANSMISSION',
         voltage: { $exists: true, $ne: null }
@@ -168,15 +173,35 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
         .sort({ timestamp: -1 })
         .select('timestamp voltage')
         .lean(),
-      
+
       // ALARM (0x16) - Latest alarm
-      Location.findOne({ 
+      Location.findOne({
         imei: { $in: imeiVariations },
         packetType: 'ALARM'
       })
         .sort({ timestamp: -1 })
         .select('timestamp alarm oil electric door defense latitude longitude')
-        .lean()
+        .lean(),
+
+      // Catch-all: absolute latest packet regardless of packetType.
+      // Ensures lastUpdate reflects the true last device contact even when
+      // newer packets have an unexpected/missing packetType.
+      Location.findOne({ imei: { $in: imeiVariations } })
+        .sort({ timestamp: -1 })
+        .select('timestamp latitude longitude speed acc')
+        .lean(),
+
+      // Latest packet that has GPS coordinates — any packetType.
+      // Used to update the map position when newer packets carry coordinates
+      // but have a packetType not matched by the LOCATION/LOCATION_EXT queries.
+      Location.findOne({
+        imei: { $in: imeiVariations },
+        latitude:  { $exists: true, $gt: 0 },
+        longitude: { $exists: true, $ne: null },
+      })
+        .sort({ timestamp: -1 })
+        .select('timestamp latitude longitude speed satellites acc')
+        .lean(),
     ]);
     
     // Log what packets were found
@@ -224,26 +249,42 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
       lastUpdate: null
     };
     
-    // Build GPS data (prefer LOCATION_EXT for most recent with status)
-    const gpsSource = locationExtData || locationData;
+    // Build GPS data.
+    // Priority: whichever of LOCATION_EXT, LOCATION, or latestGps (any-type) is newest.
+    // This ensures position updates even when the device sends packets without a
+    // recognised packetType (e.g. after a firmware change or TCP server update).
+    const gpsSource = [locationExtData, locationData, latestGps]
+      .filter(Boolean)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
     if (gpsSource) {
       aggregatedData.gpsData = {
-        latitude: gpsSource.latitude,
-        longitude: gpsSource.longitude,
-        speed: gpsSource.speed || 0,
+        latitude:   gpsSource.latitude,
+        longitude:  gpsSource.longitude,
+        speed:      gpsSource.speed || 0,
         satellites: gpsSource.satellites || 0,
-        course: gpsSource.course,
-        gpsFixed: gpsSource.gpsFixed,
-        timestamp: gpsSource.timestamp
+        course:     gpsSource.course,
+        gpsFixed:   gpsSource.gpsFixed,
+        timestamp:  gpsSource.timestamp,
       };
       aggregatedData.lastUpdate = gpsSource.timestamp;
     }
     
     // Aggregate status data from multiple sources (prefer most recent)
-    // Ignition (ACC) - available in LOCATION, LOCATION_EXT, STATUS
-    if (locationExtData?.acc !== undefined) aggregatedData.status.ignition = locationExtData.acc;
-    else if (statusData?.acc !== undefined) aggregatedData.status.ignition = statusData.acc;
-    else if (locationData?.acc !== undefined) aggregatedData.status.ignition = locationData.acc;
+    // Ignition:
+    //   GT06 devices always report acc=false even when running — use speed >= 5 km/h
+    //   as the ignition indicator (matches processPacket logic).
+    //   FMB125 has a dedicated hardware ignition signal so acc is reliable there.
+    if (isFMB125) {
+      if (locationExtData?.acc !== undefined) aggregatedData.status.ignition = locationExtData.acc;
+      else if (statusData?.acc !== undefined) aggregatedData.status.ignition = statusData.acc;
+      else if (locationData?.acc !== undefined) aggregatedData.status.ignition = locationData.acc;
+    } else {
+      // GT06: ignition = acc=true (some wired devices) OR speed >= 5 km/h
+      const latestSpeed = locationExtData?.speed ?? locationData?.speed ?? latestGps?.speed ?? 0;
+      const latestAcc   = locationExtData?.acc ?? locationData?.acc ?? false;
+      aggregatedData.status.ignition = !!(latestAcc || latestSpeed >= 5);
+    }
     
     // Battery level - from STATUS
     if (statusData?.batteryLevel !== undefined) {
@@ -288,7 +329,9 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
       aggregatedData.alerts.alarmTimestamp = alarmData.timestamp;
     }
     
-    // Update lastUpdate to the most recent timestamp
+    // Update lastUpdate to the most recent timestamp across all packet types.
+    // Include absoluteLatest so that packets with unexpected/missing packetType
+    // (e.g. devices sending non-standard frames) still advance lastUpdate.
     const allTimestamps = [
       locationData?.timestamp,
       locationExtData?.timestamp,
@@ -296,11 +339,35 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
       heartbeatData?.timestamp,
       odometerData?.timestamp,
       voltageData?.timestamp,
-      alarmData?.timestamp
+      alarmData?.timestamp,
+      absoluteLatest?.timestamp,
     ].filter(Boolean);
-    
+
     if (allTimestamps.length > 0) {
       aggregatedData.lastUpdate = new Date(Math.max(...allTimestamps.map(t => new Date(t).getTime())));
+    }
+
+    // If the absolute latest packet (any type) is newer than gpsData.timestamp,
+    // advance the timestamp so "Last Updated" reflects true last device contact.
+    if (absoluteLatest?.timestamp) {
+      const absMs = new Date(absoluteLatest.timestamp).getTime();
+      if (aggregatedData.gpsData) {
+        const curMs = aggregatedData.gpsData.timestamp
+          ? new Date(aggregatedData.gpsData.timestamp).getTime() : 0;
+        if (absMs > curMs) {
+          aggregatedData.gpsData.timestamp = absoluteLatest.timestamp;
+          // Only update ignition from absoluteLatest for FMB125 (GT06 uses speed-based logic above)
+          if (isFMB125 && absoluteLatest.acc !== undefined) aggregatedData.status.ignition = absoluteLatest.acc;
+        }
+      } else {
+        // No GPS packet at all — still surface last contact time
+        aggregatedData.gpsData = {
+          latitude: absoluteLatest.latitude || null,
+          longitude: absoluteLatest.longitude || null,
+          speed: absoluteLatest.speed || 0,
+          timestamp: absoluteLatest.timestamp,
+        };
+      }
     }
     
     console.log(`[DEVICE] ✓ Aggregated device status from ${allTimestamps.length} packet types`);
@@ -516,8 +583,11 @@ const updateVehicle = async (id, clientId, data) => {
     err.status = 404;
     throw err;
   }
+  // Invalidate cache before update in case IMEI changes
+  if (vehicle.imei) invalidateVehicleCache(vehicle.imei);
   await vehicle.update(data);
-  
+  if (data.imei && data.imei !== vehicle.imei) invalidateVehicleCache(data.imei);
+
   // Attach GPS data to updated vehicle
   return await attachGpsData(vehicle);
 };
@@ -529,6 +599,8 @@ const deleteVehicle = async (id, clientId) => {
     err.status = 404;
     throw err;
   }
+  // Clear from packet processor cache so live stream stops writing to this vehicle
+  if (vehicle.imei) invalidateVehicleCache(vehicle.imei);
   await vehicle.update({ status: 'deleted' });
   return { message: 'Vehicle deleted successfully' };
 };
@@ -725,4 +797,50 @@ const getLocationPlayerData = async (id, clientId, from, to, limit = 10000, skip
   }
 };
 
-module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData };
+/**
+ * GET /api/vehicles/live-positions — lightweight map auto-refresh
+ * Reads only VehicleDeviceState (MySQL). No MongoDB. Fast.
+ * GT06 ignition: engineOn already computed with speed-based logic by processPacket.
+ */
+const getLivePositions = async (clientId, since) => {
+  const vehicles = await Vehicle.findAll({
+    where: { clientId },
+    attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
+  });
+  const vehicleIds = vehicles.map(v => v.id);
+  if (!vehicleIds.length) return [];
+
+  // When `since` is provided, only fetch states that changed since then.
+  // This means unchanged vehicles are skipped entirely — client keeps their last known position.
+  const stateWhere = { vehicleId: vehicleIds };
+  if (since) {
+    const sinceDate = new Date(since);
+    if (!isNaN(sinceDate)) stateWhere.lastPacketTime = { [Op.gt]: sinceDate };
+  }
+
+  const states = await VehicleDeviceState.findAll({
+    where: stateWhere,
+    attributes: ['vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn', 'lastPacketTime'],
+  });
+
+  // Build a lookup of vehicle metadata
+  const vehicleMap = new Map(vehicles.map(v => [v.id, v]));
+
+  return states.map(s => {
+    const v = vehicleMap.get(s.vehicleId);
+    if (!v) return null;
+    return {
+      id: v.id,
+      vehicleNumber: v.vehicleNumber,
+      deviceType: v.deviceType,
+      vehicleIcon: v.vehicleIcon,
+      lat: s.lastLat ? parseFloat(s.lastLat) : null,
+      lng: s.lastLng ? parseFloat(s.lastLng) : null,
+      speed: s.lastSpeed ?? 0,
+      engineOn: s.engineOn ?? false,
+      lastPacketTime: s.lastPacketTime ?? null,
+    };
+  }).filter(Boolean);
+};
+
+module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions };

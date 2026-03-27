@@ -107,15 +107,23 @@ async function processPacket(doc, deviceType) {
     const fuelLevel = doc.fuelLevel !== undefined && doc.fuelLevel !== null ? parseFloat(doc.fuelLevel) : null;
     const odometer = doc.totalOdometer || doc.mileage || null;
 
+    // For GT06: STATUS, LOGIN, HEARTBEAT, etc. carry no GPS or speed data.
+    // Running them through the state machine would falsely flip engineOn to false
+    // the instant they arrive (acc=false, speed=0 → ignitionOn=false).
+    // Only update lastPacketTime so "last seen" stays accurate; skip everything else.
+    if (deviceType === 'GT06' && lat === null && lng === null) {
+      let state = await VehicleDeviceState.findOne({ where: { vehicleId } });
+      if (!state) state = await VehicleDeviceState.create({ vehicleId, imei });
+      await VehicleDeviceState.update({ lastPacketTime: packetTime }, { where: { vehicleId } });
+      return;
+    }
+
     // Ignition detection:
     //   FMB125 → doc.ignition (dedicated signal)
-    //   GT06   → doc.acc when ACC wire is connected;
-    //            fall back to speed >= 5 km/h when acc is not wired.
-    //            5 km/h threshold filters GPS position-drift noise (typically 1-3 km/h
-    //            on parked vehicles) while still detecting slow urban movement.
-    const MIN_MOVING_SPEED_KMPH = 5;
+    //   GT06   → acc wire OR speed-based fallback (many GT06 devices send acc=false
+    //             even when moving — speed >= 5 km/h reliably identifies real driving)
     const ignitionOn = deviceType === 'GT06'
-      ? !!(doc.acc || speed >= MIN_MOVING_SPEED_KMPH)
+      ? !!(doc.acc || speed >= 5)
       : !!(doc.ignition || doc.acc);
 
     console.log(`[PacketProcessor:${deviceType}] imei=${imei} vehicleId=${vehicleId} ignition=${ignitionOn} acc=${doc.acc} speed=${speed} lat=${lat} lng=${lng} ts=${packetTime.toISOString()}`);
@@ -209,6 +217,11 @@ async function processPacket(doc, deviceType) {
         }
 
         // ③ Start new Trip
+        // Use the last known position (before sleep/idle) as the departure point.
+        // The first GPS packet after a sleep gap arrives mid-journey; state.lastLat
+        // is where the vehicle was last seen parked — the true trip origin.
+        const tripStartLat = state.lastLat || lat;
+        const tripStartLng = state.lastLng || lng;
         const newTrip = await Trip.create({
           vehicleId,
           imei,
@@ -216,8 +229,8 @@ async function processPacket(doc, deviceType) {
           endTime: packetTime,
           duration: 0,
           distance: 0,
-          startLatitude: lat,
-          startLongitude: lng,
+          startLatitude: tripStartLat,
+          startLongitude: tripStartLng,
           avgSpeed: 0,
           maxSpeed: 0,
           idleTime: 0,
@@ -345,7 +358,8 @@ async function processPacket(doc, deviceType) {
             engineStatus: false,
             duration: Math.floor(gapMs / 1000),
           });
-          // Start a fresh trip for the new movement
+          // Start a fresh trip for the new movement.
+          // Use the pre-gap position as the departure point (same logic as ENGINE ON).
           const newTrip = await Trip.create({
             vehicleId,
             imei,
@@ -353,8 +367,8 @@ async function processPacket(doc, deviceType) {
             endTime: packetTime,
             duration: 0,
             distance: 0,
-            startLatitude: lat,
-            startLongitude: lng,
+            startLatitude: state.lastLat || lat,
+            startLongitude: state.lastLng || lng,
             avgSpeed: 0,
             maxSpeed: 0,
             idleTime: 0,
@@ -447,7 +461,15 @@ async function processPacket(doc, deviceType) {
       { where: { vehicleId } }
     );
   } catch (err) {
-    console.error('[PacketProcessor] Error processing packet:', err.message);
+    // If a FK constraint error occurs the vehicleCache likely holds a stale entry
+    // from a vehicle that was deleted directly from the DB and re-added (new id).
+    // Invalidate so the next packet does a fresh DB lookup with the correct id.
+    if (err.name === 'SequelizeForeignKeyConstraintError' && doc?.imei) {
+      invalidateVehicleCache(doc.imei);
+      console.warn(`[PacketProcessor] FK violation for IMEI ${doc.imei} — stale cache cleared, will retry on next packet`);
+    } else {
+      console.error('[PacketProcessor] Error processing packet:', err.message);
+    }
   }
 }
 
@@ -490,6 +512,9 @@ async function reprocessVehicle(vehicleId, from, to) {
   const vehicle = await Vehicle.findByPk(vehicleId);
   if (!vehicle || !vehicle.imei) return { processed: 0 };
 
+  // Clear stale cache so processPacket finds the active vehicle, not a soft-deleted one with the same IMEI
+  invalidateVehicleCache(vehicle.imei);
+
   const db = getMongoDb();
   const fromDate = new Date(from);
   const toDate = new Date(to);
@@ -508,6 +533,7 @@ async function reprocessVehicle(vehicleId, from, to) {
   let processed = 0;
   const imeis = [vehicle.imei];
   if (vehicle.imei.startsWith('0')) imeis.push(vehicle.imei.slice(1));
+  else imeis.push('0' + vehicle.imei);
 
   // Reset device state for clean reprocessing
   await VehicleDeviceState.destroy({ where: { vehicleId } });

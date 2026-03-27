@@ -16,6 +16,7 @@ const shareRoutes = require('./share.routes');
 const alertRoutes = require('./alert.routes');
 const notificationRoutes = require('./notification.routes');
 const supportRoutes = require('./support.routes');
+const geofenceRoutes = require('./geofence.routes');
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -32,5 +33,6 @@ router.use('/share', shareRoutes);
 router.use('/alerts', alertRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/support', supportRoutes);
+router.use('/geofences', geofenceRoutes);
 
 module.exports = router;
