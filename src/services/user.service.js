@@ -186,7 +186,7 @@ const getClientDetail = async (callerClientIds, clientId) => {
   const vehicles = await Vehicle.findAll({
     where: { clientId: clientId },
     attributes: ['id', 'vehicleNumber', 'vehicleName', 'vehicleIcon', 'deviceType', 'status', 'imei'],
-    order: [['created_at', 'DESC']],
+    order: [['registered_at', 'DESC']],
   });
 
   const vehicleCount = vehicles.length;
