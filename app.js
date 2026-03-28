@@ -20,7 +20,7 @@ const allowedOrigins = [
   'https://driveinnovate.in',
   'https://www.driveinnovate.in',
   'https://stage.driveinnovate.in',
-  'http://localhost:61878'
+  'http://localhost:64620'
 ];
 
 const corsOptions = {

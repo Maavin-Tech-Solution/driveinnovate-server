@@ -12,4 +12,7 @@ router.get('/user-stats', validateConsumer, dashboardController.getUserStats);
 // GET /api/dashboard/overspeed-vehicles - get vehicles that exceeded speed threshold in last 24 hours
 router.get('/overspeed-vehicles', validateConsumer, dashboardController.getOverspeedVehicles);
 
+// GET /api/dashboard/network-stats - papa/dealer network-wide aggregates
+router.get('/network-stats', validateConsumer, dashboardController.getNetworkStats);
+
 module.exports = router;

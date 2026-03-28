@@ -113,4 +113,18 @@ const listClients = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients };
+/**
+ * GET /api/users/clients/:clientId
+ * Full detail: client info + sub-clients + direct vehicles + stats.
+ */
+const getClientDetail = async (req, res) => {
+  try {
+    const clientId = Number(req.params.clientId);
+    const data = await userService.getClientDetail(req.user.clientIds, clientId);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail };

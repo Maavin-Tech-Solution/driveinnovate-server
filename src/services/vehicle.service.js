@@ -504,9 +504,28 @@ const attachGpsData = async (vehicle) => {
  * Helper function to attach comprehensive device status to a vehicle object
  * Used for sync operations to return complete vehicle status
  */
+const FMB125_TYPES = ['FMB125', 'FMB120', 'FMB130', 'FMB140', 'FMB920'];
+
 const attachComprehensiveStatus = async (vehicle) => {
   const vehicleJson = vehicle.toJSON();
   const deviceStatus = await fetchComprehensiveDeviceStatus(vehicleJson.imei, vehicleJson.deviceType);
+
+  // For GT06-family devices, the MongoDB speed-based ignition inference (`speed >= 5`)
+  // is stale when the vehicle has stopped but only sends STATUS/HEARTBEAT packets (no GPS).
+  // VehicleDeviceState.engineOn is updated by the packet processor on every GPS packet
+  // and is the authoritative source — use it to override the heuristic.
+  const isFMB125 = vehicleJson.deviceType &&
+    FMB125_TYPES.includes(vehicleJson.deviceType.toUpperCase());
+  if (!isFMB125 && deviceStatus) {
+    const state = await VehicleDeviceState.findOne({
+      where: { vehicleId: vehicleJson.id },
+      attributes: ['engineOn'],
+    });
+    if (state != null && state.engineOn != null) {
+      deviceStatus.status.ignition = state.engineOn;
+    }
+  }
+
   return {
     ...vehicleJson,
     deviceStatus,

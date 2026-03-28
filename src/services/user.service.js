@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
-const { UniqueConstraintError } = require('sequelize');
-const { User, UserMeta } = require('../models');
+const { UniqueConstraintError, fn, col } = require('sequelize');
+const { sequelize, User, UserMeta, Vehicle } = require('../models');
 
 const getProfile = async (userId) => {
   const user = await User.findByPk(userId, { attributes: { exclude: ['password'] } });
@@ -109,7 +109,107 @@ const listClients = async (parentUserId) => {
     include: [{ model: UserMeta, as: 'meta', required: false }],
     order: [['created_at', 'DESC']],
   });
-  return clients;
+
+  if (!clients.length) return [];
+
+  const ids = clients.map(c => c.id);
+
+  // Batch: vehicle count per client
+  const vcRows = await Vehicle.findAll({
+    where: { clientId: ids },
+    attributes: ['clientId', [fn('COUNT', col('id')), 'cnt']],
+    group: ['clientId'],
+    raw: true,
+  });
+  const vcMap = Object.fromEntries(vcRows.map(r => [r.clientId, Number(r.cnt)]));
+
+  // Batch: sub-client count per client
+  const scRows = await User.findAll({
+    where: { parentId: ids },
+    attributes: ['parentId', [fn('COUNT', col('id')), 'cnt']],
+    group: ['parentId'],
+    raw: true,
+  });
+  const scMap = Object.fromEntries(scRows.map(r => [r.parentId, Number(r.cnt)]));
+
+  return clients.map(c => ({
+    ...c.toJSON(),
+    vehicleCount: vcMap[c.id] || 0,
+    subClientCount: scMap[c.id] || 0,
+  }));
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients };
+const getClientDetail = async (callerClientIds, clientId) => {
+  if (!callerClientIds.includes(clientId)) {
+    const err = new Error('Access denied');
+    err.status = 403;
+    throw err;
+  }
+
+  const client = await User.findByPk(clientId, {
+    attributes: { exclude: ['password'] },
+    include: [{ model: UserMeta, as: 'meta', required: false }],
+  });
+  if (!client) {
+    const err = new Error('Client not found');
+    err.status = 404;
+    throw err;
+  }
+
+  // Direct sub-clients
+  const subClients = await User.findAll({
+    where: { parentId: clientId },
+    attributes: { exclude: ['password'] },
+    include: [{ model: UserMeta, as: 'meta', required: false }],
+    order: [['created_at', 'DESC']],
+  });
+
+  // Vehicle counts for sub-clients (batch)
+  const subIds = subClients.map(sc => sc.id);
+  let subVcMap = {};
+  if (subIds.length) {
+    const rows = await Vehicle.findAll({
+      where: { clientId: subIds },
+      attributes: ['clientId', [fn('COUNT', col('id')), 'cnt']],
+      group: ['clientId'],
+      raw: true,
+    });
+    subVcMap = Object.fromEntries(rows.map(r => [r.clientId, Number(r.cnt)]));
+  }
+
+  const subClientsData = subClients.map(sc => ({
+    ...sc.toJSON(),
+    vehicleCount: subVcMap[sc.id] || 0,
+  }));
+
+  // Direct vehicles
+  const vehicles = await Vehicle.findAll({
+    where: { clientId: clientId },
+    attributes: ['id', 'vehicleNumber', 'vehicleName', 'vehicleIcon', 'deviceType', 'status', 'imei'],
+    order: [['created_at', 'DESC']],
+  });
+
+  const vehicleCount = vehicles.length;
+  const networkVehicleCount = vehicleCount + Object.values(subVcMap).reduce((s, c) => s + c, 0);
+
+  return {
+    client: client.toJSON(),
+    subClients: subClientsData,
+    vehicles: vehicles.map(v => v.toJSON()),
+    stats: {
+      subClientCount: subClients.length,
+      vehicleCount,
+      networkVehicleCount,
+    },
+  };
+};
+
+module.exports = {
+  getProfile,
+  updateProfile,
+  updatePassword,
+  updateNotifications,
+  createClient,
+  listClients,
+  getClientDetail,
+};

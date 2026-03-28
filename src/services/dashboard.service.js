@@ -1,4 +1,4 @@
-const { Vehicle, Challan, RtoDetail, VehicleGroup } = require('../models');
+const { Vehicle, Challan, RtoDetail, VehicleGroup, User } = require('../models');
 const { Op } = require('sequelize');
 const { Location } = require('../config/mongodb');
 
@@ -141,4 +141,22 @@ const getOverspeedVehicles = async (userId, speedThreshold = 80) => {
   }
 };
 
-module.exports = { getStats, getUserStats, getOverspeedVehicles };
+/**
+ * Network-wide stats for papa / dealer.
+ * clientIds = [self, ...all descendants] from resolveUserRole.
+ */
+const getNetworkStats = async (clientIds) => {
+  const [totalVehicles, activeVehicles, totalClients] = await Promise.all([
+    Vehicle.count({ where: { clientId: clientIds } }),
+    Vehicle.count({ where: { clientId: clientIds, status: 'active' } }),
+    User.count({ where: { id: clientIds } }),
+  ]);
+  return {
+    totalClients,       // includes self
+    totalVehicles,
+    activeVehicles,
+    inactiveVehicles: totalVehicles - activeVehicles,
+  };
+};
+
+module.exports = { getStats, getUserStats, getOverspeedVehicles, getNetworkStats };

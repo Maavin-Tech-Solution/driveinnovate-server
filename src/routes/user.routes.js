@@ -18,6 +18,9 @@ router.put('/me/notifications', validateConsumer, userController.updateNotificat
 // GET  /api/users/clients - list direct children of current user
 router.get('/clients', validateConsumer, userController.listClients);
 
+// GET  /api/users/clients/:clientId - full detail for a single client
+router.get('/clients/:clientId', validateConsumer, userController.getClientDetail);
+
 // POST /api/users/clients - create a client under current user
 router.post('/clients', validateConsumer, userController.createClient);
 

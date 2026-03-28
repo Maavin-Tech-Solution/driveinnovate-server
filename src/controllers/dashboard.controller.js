@@ -37,4 +37,18 @@ const getOverspeedVehicles = async (req, res) => {
   }
 };
 
-module.exports = { getStats, getUserStats, getOverspeedVehicles };
+/**
+ * GET /api/dashboard/network-stats
+ * Requires papa / dealer role (clientIds in req.user contains full network).
+ */
+const getNetworkStats = async (req, res) => {
+  try {
+    const clientIds = req.user.clientIds || [req.user.id];
+    const stats = await dashboardService.getNetworkStats(clientIds);
+    return res.json({ success: true, data: stats });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getStats, getUserStats, getOverspeedVehicles, getNetworkStats };
