@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const { Op } = require('sequelize');
-const { Vehicle, VehicleDeviceState, Trip, VehicleEngineSession } = require('../models');
+const { Vehicle, VehicleDeviceState, Trip, VehicleEngineSession, Stop } = require('../models');
 const { getMongoDb } = require('../config/mongodb');
 
 // Dynamic model loader for device types
@@ -214,4 +214,66 @@ const getVehicleStatus = async (req, res) => {
   }
 };
 
-module.exports = { getDataPackets, getVehicleStatus };
+/**
+ * GET /api/debug/sessions?vehicleId=X&from=2026-03-29&to=2026-03-29
+ * Shows every VehicleEngineSession row for a vehicle in an IST date range.
+ * Use this to diagnose inflated / negative engine hours.
+ */
+const IST_MS = 5.5 * 60 * 60 * 1000;
+const getSessions = async (req, res) => {
+  try {
+    const { vehicleId, from, to } = req.query;
+    if (!vehicleId) return res.status(400).json({ success: false, message: 'vehicleId required' });
+    const fromDate = from
+      ? new Date(new Date(from).getTime() - IST_MS)
+      : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const toDate = to
+      ? new Date(new Date(to).getTime() - IST_MS + 24 * 60 * 60 * 1000 - 1)
+      : new Date();
+
+    const sessions = await VehicleEngineSession.findAll({
+      where: {
+        vehicleId,
+        [Op.or]: [
+          { startTime: { [Op.between]: [fromDate, toDate] } },
+          { startTime: { [Op.lt]: fromDate }, endTime: { [Op.gt]: fromDate } },
+          { startTime: { [Op.lt]: fromDate }, endTime: null },
+        ],
+      },
+      order: [['startTime', 'ASC']],
+    });
+
+    const toIST = (d) => d ? new Date(new Date(d).getTime() + IST_MS).toISOString().replace('T', ' ').slice(0, 19) + ' IST' : null;
+    const fmtSecs = (s) => {
+      if (!s && s !== 0) return null;
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+      return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    };
+
+    const rows = sessions.map(s => ({
+      id: s.id,
+      status: s.status,
+      startTime_IST: toIST(s.startTime),
+      endTime_IST:   toIST(s.endTime),
+      durationSeconds: s.durationSeconds,
+      durationFormatted: fmtSecs(s.durationSeconds),
+    }));
+
+    const totalCompleted = sessions
+      .filter(s => s.status === 'completed')
+      .reduce((sum, s) => sum + (s.durationSeconds || 0), 0);
+
+    res.json({
+      success: true,
+      queryRange: { from: toIST(fromDate), to: toIST(toDate) },
+      totalSessions: sessions.length,
+      totalCompletedEngineHours: fmtSecs(totalCompleted),
+      totalCompletedSeconds: totalCompleted,
+      rows,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getDataPackets, getVehicleStatus, getSessions };

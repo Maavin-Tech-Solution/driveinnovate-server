@@ -18,6 +18,7 @@ const notificationRoutes = require('./notification.routes');
 const supportRoutes = require('./support.routes');
 const geofenceRoutes = require('./geofence.routes');
 const permissionRoutes = require('./permission.routes');
+const masterRoutes = require('./master.routes');
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -36,5 +37,6 @@ router.use('/notifications', notificationRoutes);
 router.use('/support', supportRoutes);
 router.use('/geofences', geofenceRoutes);
 router.use('/permissions', permissionRoutes);
+router.use('/master', masterRoutes);
 
 module.exports = router;

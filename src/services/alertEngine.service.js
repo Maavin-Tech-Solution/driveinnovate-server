@@ -134,8 +134,12 @@ async function checkVehicle(alert, vehicle) {
   const engineOn = state.engineOn  || false;
   const packetTime = state.lastPacketTime;
 
-  // Skip if packet is too old (> 10 minutes stale) to avoid false alarms
-  if (!packetTime || minutesSince(packetTime) > 10) {
+  // Use lastGpsPacketTime for staleness check — GT06 heartbeat/status packets
+  // refresh lastPacketTime without updating speed data, which would cause false
+  // speed alerts for parked vehicles. lastGpsPacketTime is only set when a real
+  // GPS packet (with lat/lng) is processed, so it reflects actual data freshness.
+  const gpsPacketTime = state.lastGpsPacketTime || state.lastPacketTime;
+  if (!gpsPacketTime || minutesSince(gpsPacketTime) > 10) {
     clearConditionStart(alert.id, vehicle.id);
     return;
   }
@@ -144,7 +148,7 @@ async function checkVehicle(alert, vehicle) {
     speed,
     lat:        state.lastLat  ? parseFloat(state.lastLat)  : null,
     lng:        state.lastLng  ? parseFloat(state.lastLng)  : null,
-    packetTime: packetTime,
+    packetTime: gpsPacketTime,
     vehicleNumber: vehicle.vehicleNumber,
     vehicleName:   vehicle.vehicleName,
   };

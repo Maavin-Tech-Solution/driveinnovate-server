@@ -23,6 +23,8 @@ const SupportTicket = require('./SupportTicket');
 const Geofence = require('./Geofence');
 const GeofenceAssignment = require('./GeofenceAssignment');
 const UserPermission = require('./UserPermission');
+const DeviceConfig = require('./DeviceConfig');
+const StateDefinition = require('./StateDefinition');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -106,6 +108,10 @@ Vehicle.hasMany(GeofenceAssignment, { foreignKey: 'vehicleId', as: 'geofenceAssi
 GeofenceAssignment.belongsTo(VehicleGroup, { foreignKey: 'groupId', as: 'group' });
 VehicleGroup.hasMany(GeofenceAssignment, { foreignKey: 'groupId', as: 'geofenceAssignments' });
 
+// Device Configs & State Definitions
+DeviceConfig.hasMany(StateDefinition, { foreignKey: 'deviceConfigId', as: 'states' });
+StateDefinition.belongsTo(DeviceConfig, { foreignKey: 'deviceConfigId', as: 'deviceConfig' });
+
 // User Permissions
 User.hasOne(UserPermission, { foreignKey: 'userId', as: 'permissions' });
 UserPermission.belongsTo(User, { foreignKey: 'userId', as: 'user' });
@@ -149,4 +155,6 @@ module.exports = {
   Geofence,
   GeofenceAssignment,
   UserPermission,
+  DeviceConfig,
+  StateDefinition,
 };

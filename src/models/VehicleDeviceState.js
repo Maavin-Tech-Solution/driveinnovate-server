@@ -27,6 +27,7 @@ const VehicleDeviceState = sequelize.define('VehicleDeviceState', {
   lastSpeed: { type: DataTypes.SMALLINT, allowNull: true, field: 'last_speed' },
   lastFuelLevel: { type: DataTypes.DECIMAL(6, 2), allowNull: true, field: 'last_fuel_level', comment: 'Fuel % from last packet' },
   lastPacketTime: { type: DataTypes.DATE, allowNull: true, field: 'last_packet_time' },
+  lastGpsPacketTime: { type: DataTypes.DATE, allowNull: true, field: 'last_gps_packet_time', comment: 'Time of last packet that carried real GPS coordinates (lat/lng) — used for alert staleness check' },
 }, {
   tableName: 'vehicle_device_states',
   timestamps: true,
