@@ -2,12 +2,27 @@ const { DeviceConfig, StateDefinition } = require('../models');
 
 // ─── Default state definitions ────────────────────────────────────────────────
 
+// No Signal threshold: 15 minutes without any packet → device is offline/unreachable
+const NO_SIGNAL_SECONDS = 900;
+
 const GT06_DEFAULTS = [
   {
-    stateName: 'No GPS',
-    stateColor: '#94A3B8',
-    stateIcon: '📡',
+    // Priority 1: device has gone silent — no packet in 15+ min.
+    // Must be checked FIRST so stale ignition/speed values don't match Running/Idle.
+    stateName: 'No Signal',
+    stateColor: '#64748B',
+    stateIcon: '📵',
     priority: 1,
+    conditionLogic: 'AND',
+    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
+    isDefault: false,
+  },
+  {
+    // Priority 2: device is live but has no GPS fix
+    stateName: 'No GPS',
+    stateColor: '#F59E0B',
+    stateIcon: '📡',
+    priority: 2,
     conditionLogic: 'AND',
     conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
     isDefault: false,
@@ -16,7 +31,7 @@ const GT06_DEFAULTS = [
     stateName: 'Overspeed',
     stateColor: '#DC2626',
     stateIcon: '🏎️',
-    priority: 2,
+    priority: 3,
     conditionLogic: 'AND',
     conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
     isDefault: false,
@@ -25,7 +40,7 @@ const GT06_DEFAULTS = [
     stateName: 'Running',
     stateColor: '#16A34A',
     stateIcon: '🟢',
-    priority: 3,
+    priority: 4,
     conditionLogic: 'AND',
     conditions: [
       { field: 'ignition', operator: 'eq', value: true },
@@ -37,7 +52,7 @@ const GT06_DEFAULTS = [
     stateName: 'Idle',
     stateColor: '#D97706',
     stateIcon: '⏸️',
-    priority: 4,
+    priority: 5,
     conditionLogic: 'AND',
     conditions: [
       { field: 'ignition', operator: 'eq', value: true },
@@ -49,7 +64,7 @@ const GT06_DEFAULTS = [
     stateName: 'Stopped',
     stateColor: '#EF4444',
     stateIcon: '🔴',
-    priority: 5,
+    priority: 6,
     conditionLogic: 'AND',
     conditions: [{ field: 'ignition', operator: 'eq', value: false }],
     isDefault: false,
@@ -67,10 +82,19 @@ const GT06_DEFAULTS = [
 
 const FMB125_DEFAULTS = [
   {
-    stateName: 'No GPS',
-    stateColor: '#94A3B8',
-    stateIcon: '📡',
+    stateName: 'No Signal',
+    stateColor: '#64748B',
+    stateIcon: '📵',
     priority: 1,
+    conditionLogic: 'AND',
+    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
+    isDefault: false,
+  },
+  {
+    stateName: 'No GPS',
+    stateColor: '#F59E0B',
+    stateIcon: '📡',
+    priority: 2,
     conditionLogic: 'AND',
     conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
     isDefault: false,
@@ -79,7 +103,7 @@ const FMB125_DEFAULTS = [
     stateName: 'Overspeed',
     stateColor: '#DC2626',
     stateIcon: '🏎️',
-    priority: 2,
+    priority: 3,
     conditionLogic: 'AND',
     conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
     isDefault: false,
@@ -88,7 +112,7 @@ const FMB125_DEFAULTS = [
     stateName: 'Running',
     stateColor: '#16A34A',
     stateIcon: '🟢',
-    priority: 3,
+    priority: 4,
     conditionLogic: 'AND',
     conditions: [
       { field: 'ignition', operator: 'eq', value: true },
@@ -100,7 +124,7 @@ const FMB125_DEFAULTS = [
     stateName: 'Idle',
     stateColor: '#D97706',
     stateIcon: '⏸️',
-    priority: 4,
+    priority: 5,
     conditionLogic: 'AND',
     conditions: [
       { field: 'ignition', operator: 'eq', value: true },
@@ -112,7 +136,7 @@ const FMB125_DEFAULTS = [
     stateName: 'Stopped',
     stateColor: '#EF4444',
     stateIcon: '🔴',
-    priority: 5,
+    priority: 6,
     conditionLogic: 'AND',
     conditions: [{ field: 'ignition', operator: 'eq', value: false }],
     isDefault: false,
@@ -159,14 +183,30 @@ const seedBuiltIns = async () => {
       defaults: configData,
     });
 
-    // Seed default states if none exist yet (handles fresh tables and re-runs)
-    const existingCount = await StateDefinition.count({ where: { deviceConfigId: config.id } });
-    if (existingCount === 0) {
-      await StateDefinition.bulkCreate(
-        defaults.map(d => ({ ...d, deviceConfigId: config.id }))
-      );
-    }
+    // Always replace built-in states so updated defaults are applied on every server start.
+    await StateDefinition.destroy({ where: { deviceConfigId: config.id } });
+    await StateDefinition.bulkCreate(
+      defaults.map(d => ({ ...d, deviceConfigId: config.id }))
+    );
   }
+};
+
+// Manually reset a built-in device's states to the current defaults (called via API)
+const reseedBuiltInStates = async (deviceConfigId) => {
+  const config = await DeviceConfig.findByPk(deviceConfigId);
+  if (!config) { const e = new Error('Device not found'); e.status = 404; throw e; }
+  if (!config.isBuiltIn) {
+    const e = new Error('Only built-in device types can be reset to defaults');
+    e.status = 400; throw e;
+  }
+  const spec = BUILT_INS.find(s => s.type === config.type);
+  if (!spec) { const e = new Error('No defaults defined for this device type'); e.status = 404; throw e; }
+
+  await StateDefinition.destroy({ where: { deviceConfigId: config.id } });
+  await StateDefinition.bulkCreate(
+    spec.defaults.map(d => ({ ...d, deviceConfigId: config.id }))
+  );
+  return listStates(deviceConfigId);
 };
 
 // ─── Device Config CRUD ───────────────────────────────────────────────────────
@@ -282,6 +322,7 @@ const getAllStateDefinitions = async () => {
 
 module.exports = {
   seedBuiltIns,
+  reseedBuiltInStates,
   listDeviceConfigs,
   createDeviceConfig,
   updateDeviceConfig,

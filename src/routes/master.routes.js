@@ -24,5 +24,6 @@ router.get('/device-configs/:deviceId/states',    ctrl.listStates);
 router.post('/device-configs/:deviceId/states',   ctrl.createState);
 router.put('/states/:stateId',                    ctrl.updateState);
 router.delete('/states/:stateId',                 ctrl.deleteState);
+router.post('/device-configs/:id/reset-states',   ctrl.reseedStates);
 
 module.exports = router;

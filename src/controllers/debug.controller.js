@@ -13,27 +13,99 @@ const getModelForDeviceType = (deviceType) => {
   return null;
 };
 
+// Parse a datetime string as IST (append +05:30 if no tz present)
+const parseIst = (str) => {
+  if (!str) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return new Date(str + 'T00:00:00+05:30');
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(str)) return new Date(str + ':00+05:30');
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(str)) return new Date(str + '+05:30');
+  return new Date(str);
+};
+
 /**
- * GET /api/debug/data-packets?imei=...&deviceType=...
- * Returns raw MongoDB packets for an IMEI
+ * GET /api/debug/data-packets
+ * Query params:
+ *   imei + deviceType  OR  vehicleId
+ *   from, to           — IST datetime strings (YYYY-MM-DD or YYYY-MM-DDTHH:mm)
+ *   packetType         — exact match, 'all' to skip
+ *   acc                — 'true' | 'false' | 'any'
+ *   hasGps             — 'yes' | 'no' | 'any'
+ *   minSpeed, maxSpeed — numbers
+ *   hasBattery         — 'yes' | 'no' | 'any'
+ *   limit, skip
  */
 const getDataPackets = async (req, res) => {
   try {
-    const { imei, deviceType } = req.query;
-    if (!imei || !deviceType) {
-      return res.status(400).json({ success: false, message: 'imei and deviceType are required' });
+    let { imei, deviceType, vehicleId, packetType, acc, hasGps, minSpeed, maxSpeed, hasBattery, from, to } = req.query;
+
+    // Resolve IMEI + deviceType from vehicleId if provided
+    if (vehicleId && !imei) {
+      const vehicle = await Vehicle.findByPk(vehicleId);
+      if (!vehicle) return res.status(404).json({ success: false, message: 'Vehicle not found' });
+      imei = vehicle.imei;
+      deviceType = vehicle.deviceType || deviceType;
     }
+
+    if (!imei || !deviceType) {
+      return res.status(400).json({ success: false, message: 'imei and deviceType (or vehicleId) are required' });
+    }
+
     const Model = getModelForDeviceType(deviceType);
     if (!Model) {
       return res.status(400).json({ success: false, message: 'Invalid device type' });
     }
-    const packets = await Model.find({ imei })
-      .sort({ date: -1, timestamp: -1, createdAt: -1 })
-      .limit(Number(req.query.limit) || 20)
-      .skip(Number(req.query.skip) || 0);
+
+    // IMEI variants (leading-zero both ways)
+    const imeiVariants = [imei];
+    if (imei.startsWith('0')) imeiVariants.push(imei.slice(1));
+    else imeiVariants.push('0' + imei);
+
+    // Build MongoDB filter
+    const filter = { imei: { $in: imeiVariants } };
+
+    // Date range (IST)
+    if (from || to) {
+      filter.timestamp = {};
+      if (from) filter.timestamp.$gte = parseIst(from);
+      if (to)   filter.timestamp.$lte = parseIst(to);
+    }
+
+    // Packet type
+    if (packetType && packetType !== 'all') filter.packetType = packetType;
+
+    // ACC
+    if (acc === 'true')  filter.acc = true;
+    else if (acc === 'false') filter.acc = false;
+
+    // Has GPS
+    if (hasGps === 'yes') {
+      filter.latitude  = { $exists: true, $gt: 0 };
+      filter.longitude = { $exists: true, $ne: null };
+    } else if (hasGps === 'no') {
+      filter.$or = [{ latitude: { $exists: false } }, { latitude: { $lte: 0 } }];
+    }
+
+    // Speed range
+    if (minSpeed !== undefined || maxSpeed !== undefined) {
+      filter.speed = {};
+      if (minSpeed !== undefined) filter.speed.$gte = Number(minSpeed);
+      if (maxSpeed !== undefined) filter.speed.$lte = Number(maxSpeed);
+    }
+
+    // Battery presence
+    if (hasBattery === 'yes')  filter.battery = { $exists: true, $ne: null };
+    else if (hasBattery === 'no') filter.battery = { $exists: false };
+
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const skip  = Number(req.query.skip) || 0;
+
+    const packets = await Model.find(filter)
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .skip(skip);
 
     const mapped = packets.map(doc => ({
-      date: doc.date || doc.timestamp || doc.createdAt || null,
+      date: doc.timestamp || doc.date || doc.createdAt || null,
       imei: doc.imei || imei,
       deviceType,
       data: doc,

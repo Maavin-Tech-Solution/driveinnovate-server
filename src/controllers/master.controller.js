@@ -86,6 +86,15 @@ const deleteState = async (req, res) => {
   }
 };
 
+const reseedStates = async (req, res) => {
+  try {
+    const data = await svc.reseedBuiltInStates(req.params.id);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   listDeviceConfigs,
   createDeviceConfig,
@@ -95,4 +104,5 @@ module.exports = {
   createState,
   updateState,
   deleteState,
+  reseedStates,
 };
