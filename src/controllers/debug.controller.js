@@ -50,7 +50,7 @@ const getDataPackets = async (req, res) => {
       return res.status(400).json({ success: false, message: 'imei and deviceType (or vehicleId) are required' });
     }
 
-    const Model = getModelForDeviceType(deviceType);
+    const Model = getModelForDeviceType(deviceType.toLowerCase());
     if (!Model) {
       return res.status(400).json({ success: false, message: 'Invalid device type' });
     }

@@ -387,14 +387,18 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
  */
 const fetchFMB125Status = async (LocationModel, imeiVariations) => {
   try {
-    // FMB125 stores everything in one record, just get the latest with GPS
-    const latestRecord = await LocationModel.findOne({
-      imei: { $in: imeiVariations },
-      latitude: { $exists: true, $ne: null },
-      longitude: { $exists: true, $ne: null }
-    })
-      .sort({ timestamp: -1 })
-      .lean();
+    // Run GPS-only query and absolute-latest query in parallel.
+    // The GPS query provides coordinates and sensors; the catch-all gives the true last-contact time
+    // (FMB125 sends non-GPS heartbeat / status packets that the GPS query misses).
+    const [latestRecord, absoluteLatest] = await Promise.all([
+      LocationModel.findOne({
+        imei: { $in: imeiVariations },
+        latitude: { $exists: true, $ne: null },
+        longitude: { $exists: true, $ne: null },
+      }).sort({ timestamp: -1 }).lean(),
+      LocationModel.findOne({ imei: { $in: imeiVariations } })
+        .sort({ timestamp: -1 }).select('timestamp').lean(),
+    ]);
 
     if (!latestRecord) {
       console.log('[DEVICE/FMB125] ✗ No records found');
@@ -479,6 +483,14 @@ const fetchFMB125Status = async (LocationModel, imeiVariations) => {
       priority: latestRecord.priority
     };
 
+    // Advance lastUpdate to the absolute latest packet if it's newer than the GPS packet.
+    // This ensures lastSeenSeconds reflects true last device contact, not just last GPS fix.
+    if (absoluteLatest?.timestamp) {
+      const absMs = new Date(absoluteLatest.timestamp).getTime();
+      const curMs = aggregatedData.lastUpdate ? new Date(aggregatedData.lastUpdate).getTime() : 0;
+      if (absMs > curMs) aggregatedData.lastUpdate = absoluteLatest.timestamp;
+    }
+
     console.log(`[DEVICE/FMB125] Status: IGN=${aggregatedData.status.ignition}, FUEL=${aggregatedData.fuel.level}%, V=${aggregatedData.status.voltage}V, RPM=${aggregatedData.engine.speed}`);
 
     return aggregatedData;
@@ -508,28 +520,26 @@ const FMB125_TYPES = ['FMB125', 'FMB120', 'FMB130', 'FMB140', 'FMB920'];
 
 const attachComprehensiveStatus = async (vehicle) => {
   const vehicleJson = vehicle.toJSON();
-  const deviceStatus = await fetchComprehensiveDeviceStatus(vehicleJson.imei, vehicleJson.deviceType);
 
-  // For GT06-family devices, the MongoDB speed-based ignition inference (`speed >= 5`)
-  // is stale when the vehicle has stopped but only sends STATUS/HEARTBEAT packets (no GPS).
-  // VehicleDeviceState.engineOn is updated by the packet processor on every GPS packet
-  // and is the authoritative source — use it to override the heuristic.
-  const isFMB125 = vehicleJson.deviceType &&
-    FMB125_TYPES.includes(vehicleJson.deviceType.toUpperCase());
-  if (!isFMB125 && deviceStatus) {
-    const state = await VehicleDeviceState.findOne({
+  // Run MongoDB status fetch and MySQL device-state lookup in parallel
+  const [deviceStatus, state] = await Promise.all([
+    fetchComprehensiveDeviceStatus(vehicleJson.imei, vehicleJson.deviceType),
+    VehicleDeviceState.findOne({
       where: { vehicleId: vehicleJson.id },
-      attributes: ['engineOn'],
-    });
-    if (state != null && state.engineOn != null) {
-      deviceStatus.status.ignition = state.engineOn;
-    }
+      attributes: ['engineOn', 'lastPacketTime'],
+    }),
+  ]);
+
+  // VehicleDeviceState is the authoritative real-time source maintained by processPacket.
+  // Overrides apply to ALL device types (GT06 + FMB125):
+  //   • ignition    — processPacket applies correct hysteresis / hardware signal per device type
+  //   • lastUpdate  — reflects actual last-packet time, not just last GPS packet (FMB125 GPS-only query is narrower)
+  if (deviceStatus && state) {
+    if (state.engineOn != null) deviceStatus.status.ignition = state.engineOn;
+    if (state.lastPacketTime) deviceStatus.lastUpdate = state.lastPacketTime;
   }
 
-  return {
-    ...vehicleJson,
-    deviceStatus,
-  };
+  return { ...vehicleJson, deviceStatus };
 };
 
 const getVehicles = async (clientId) => {
