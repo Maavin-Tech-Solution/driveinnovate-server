@@ -436,18 +436,17 @@ class ReportService {
 
     try {
       const db = getMongoDb();
-      const LocationData = db.collection('locations');
 
       let imeis = [];
       if (vehicleIds && vehicleIds.length > 0) {
         const vehicles = await Vehicle.findAll({
           where: { id: { [Op.in]: vehicleIds } },
-          attributes: ['id', 'imei']
+          attributes: ['id', 'imei', 'deviceType', 'idleThreshold']
         });
-        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei }));
+        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei, deviceType: v.deviceType, idleThreshold: v.idleThreshold }));
       } else {
-        const vehicles = await Vehicle.findAll({ attributes: ['id', 'imei'] });
-        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei }));
+        const vehicles = await Vehicle.findAll({ attributes: ['id', 'imei', 'deviceType', 'idleThreshold'] });
+        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei, deviceType: v.deviceType, idleThreshold: v.idleThreshold }));
       }
 
       const trips = [];
@@ -455,20 +454,23 @@ class ReportService {
       for (const vehicle of imeis) {
         if (!vehicle.imei) continue;
 
+        const collectionName = this._getCollectionForDevice(vehicle.deviceType);
+        const LocationData = db.collection(collectionName);
+
         const locations = await LocationData.find({
           imei: vehicle.imei,
           timestamp: {
             $gte: new Date(startDate),
             $lte: new Date(endDate)
           },
-          latitude: { $exists: true },
-          longitude: { $exists: true }
+          latitude: { $exists: true, $ne: null },
+          longitude: { $exists: true, $ne: null }
         }).sort({ timestamp: 1 }).toArray();
 
         if (locations.length < 2) continue;
 
-        // Analyze trips for this vehicle
-        const vehicleTrips = this._extractTrips(locations, vehicle.id, vehicle.imei, minTripDuration, minDistance);
+        const haltThresholdMin = vehicle.idleThreshold || 10;
+        const vehicleTrips = this._extractTrips(locations, vehicle.id, vehicle.imei, minTripDuration, minDistance, haltThresholdMin);
         trips.push(...vehicleTrips);
       }
 
@@ -481,65 +483,86 @@ class ReportService {
 
   /**
    * Extract trips from location data
+   * Trip start: speed >= SPEED_THRESHOLD (2 km/h)
+   * Trip end: speed below threshold for >= haltThresholdMin (prolonged halt) or engine off
    * @private
    */
-  _extractTrips(locations, vehicleId, imei, minTripDuration, minDistance) {
+  _extractTrips(locations, vehicleId, imei, minTripDuration, minDistance, haltThresholdMin = 10) {
+    const SPEED_THRESHOLD = 2; // km/h - minimum speed to consider vehicle moving
+    const HALT_THRESHOLD_SEC = haltThresholdMin * 60;
+
     const trips = [];
     let currentTrip = null;
+    let haltStart = null;      // timestamp when speed first dropped below threshold
+    let lastMovingLoc = null;  // last location where speed >= SPEED_THRESHOLD
 
     for (let i = 0; i < locations.length; i++) {
       const loc = locations[i];
       const speed = loc.speed || 0;
-      const ignition = loc.ignition;
+      // Normalize ignition: GT06 uses 'acc', FMB125 uses 'ignition'
+      const rawIgnition = loc.acc !== undefined ? loc.acc : loc.ignition;
+      const ignitionOff = rawIgnition === false; // explicitly false, not undefined
+      const isMoving = speed >= SPEED_THRESHOLD;
 
-      // Trip start condition: ignition on and moving
-      if (!currentTrip && (ignition || speed > 0)) {
-        currentTrip = {
-          vehicleId,
-          imei,
-          startTime: new Date(loc.timestamp),
-          startLat: loc.latitude,
-          startLng: loc.longitude,
-          points: [loc],
-          speeds: [speed],
-          totalDistance: 0
-        };
-      }
-      // Trip continues
-      else if (currentTrip && (ignition || speed > 0)) {
-        currentTrip.points.push(loc);
-        currentTrip.speeds.push(speed);
-        
-        // Calculate distance from last point
-        if (currentTrip.points.length > 1) {
-          const prevLoc = currentTrip.points[currentTrip.points.length - 2];
+      if (!currentTrip) {
+        if (isMoving) {
+          currentTrip = {
+            vehicleId,
+            imei,
+            startTime: new Date(loc.timestamp),
+            startLat: loc.latitude,
+            startLng: loc.longitude,
+            points: [loc],
+            speeds: [speed],
+            totalDistance: 0,
+          };
+          lastMovingLoc = loc;
+          haltStart = null;
+        }
+      } else {
+        // Currently in a trip
+        if (isMoving) {
+          // Vehicle moving — extend trip, reset halt tracking
+          const prevLoc = currentTrip.points[currentTrip.points.length - 1];
           const dist = this._calculateDistance(
-            prevLoc.latitude,
-            prevLoc.longitude,
-            loc.latitude,
-            loc.longitude
+            prevLoc.latitude, prevLoc.longitude, loc.latitude, loc.longitude
           );
           currentTrip.totalDistance += dist;
+          currentTrip.points.push(loc);
+          currentTrip.speeds.push(speed);
+          lastMovingLoc = loc;
+          haltStart = null;
+        } else {
+          // Speed below threshold — start or continue halt tracking
+          if (!haltStart) {
+            haltStart = new Date(loc.timestamp);
+          }
+
+          const haltDurationSec = (new Date(loc.timestamp) - haltStart) / 1000;
+
+          // End trip if prolonged halt exceeded OR engine explicitly turned off
+          if (haltDurationSec >= HALT_THRESHOLD_SEC || ignitionOff) {
+            const endLoc = lastMovingLoc || currentTrip.points[currentTrip.points.length - 1];
+            const duration = Math.floor((new Date(endLoc.timestamp) - currentTrip.startTime) / 1000);
+
+            if (duration >= minTripDuration && currentTrip.totalDistance >= minDistance) {
+              trips.push(this._createTripRecord(currentTrip, endLoc));
+            }
+            currentTrip = null;
+            lastMovingLoc = null;
+            haltStart = null;
+          }
+          // else: halt within threshold — keep trip open, vehicle may resume
         }
-      }
-      // Trip end condition: stopped for a while or ignition off
-      else if (currentTrip && !ignition && speed === 0) {
-        const duration = Math.floor((new Date(loc.timestamp) - currentTrip.startTime) / 1000);
-        
-        if (duration >= minTripDuration && currentTrip.totalDistance >= minDistance) {
-          trips.push(this._createTripRecord(currentTrip, loc));
-        }
-        currentTrip = null;
       }
     }
 
-    // Handle last trip if still ongoing
+    // Finalize any still-open trip at end of data window
     if (currentTrip && currentTrip.points.length > 1) {
-      const lastLoc = currentTrip.points[currentTrip.points.length - 1];
-      const duration = Math.floor((new Date(lastLoc.timestamp) - currentTrip.startTime) / 1000);
-      
+      const endLoc = lastMovingLoc || currentTrip.points[currentTrip.points.length - 1];
+      const duration = Math.floor((new Date(endLoc.timestamp) - currentTrip.startTime) / 1000);
       if (duration >= minTripDuration && currentTrip.totalDistance >= minDistance) {
-        trips.push(this._createTripRecord(currentTrip, lastLoc));
+        trips.push(this._createTripRecord(currentTrip, endLoc));
       }
     }
 
@@ -716,18 +739,17 @@ class ReportService {
 
     try {
       const db = getMongoDb();
-      const LocationData = db.collection('locations');
 
       let imeis = [];
       if (vehicleIds && vehicleIds.length > 0) {
         const vehicles = await Vehicle.findAll({
           where: { id: { [Op.in]: vehicleIds } },
-          attributes: ['id', 'imei']
+          attributes: ['id', 'imei', 'deviceType']
         });
-        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei }));
+        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei, deviceType: v.deviceType }));
       } else {
-        const vehicles = await Vehicle.findAll({ attributes: ['id', 'imei'] });
-        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei }));
+        const vehicles = await Vehicle.findAll({ attributes: ['id', 'imei', 'deviceType'] });
+        imeis = vehicles.map(v => ({ id: v.id, imei: v.imei, deviceType: v.deviceType }));
       }
 
       const stops = [];
@@ -735,14 +757,17 @@ class ReportService {
       for (const vehicle of imeis) {
         if (!vehicle.imei) continue;
 
+        const collectionName = this._getCollectionForDevice(vehicle.deviceType);
+        const LocationData = db.collection(collectionName);
+
         const locations = await LocationData.find({
           imei: vehicle.imei,
           timestamp: {
             $gte: new Date(startDate),
             $lte: new Date(endDate)
           },
-          latitude: { $exists: true },
-          longitude: { $exists: true }
+          latitude: { $exists: true, $ne: null },
+          longitude: { $exists: true, $ne: null }
         }).sort({ timestamp: 1 }).toArray();
 
         if (locations.length < 2) continue;
@@ -769,10 +794,12 @@ class ReportService {
     for (let i = 0; i < locations.length; i++) {
       const loc = locations[i];
       const speed = loc.speed || 0;
-      const ignition = loc.ignition;
+      // Normalize ignition: GT06 uses 'acc', FMB125 uses 'ignition'
+      const ignition = loc.acc !== undefined ? loc.acc : loc.ignition;
+      const isMoving = speed >= 2; // consistent with trip speed threshold
 
       // Stop start: vehicle not moving
-      if (!currentStop && speed === 0) {
+      if (!currentStop && !isMoving) {
         currentStop = {
           vehicleId,
           imei,
@@ -784,13 +811,13 @@ class ReportService {
         };
       }
       // Stop continues
-      else if (currentStop && speed === 0) {
+      else if (currentStop && !isMoving) {
         currentStop.points.push(loc);
         // Update engine status (take latest)
         currentStop.engineStatus = ignition;
       }
       // Stop ends: vehicle starts moving
-      else if (currentStop && speed > 0) {
+      else if (currentStop && isMoving) {
         const duration = Math.floor((new Date(loc.timestamp) - currentStop.startTime) / 1000);
         
         if (duration >= minStopDuration) {
@@ -964,6 +991,17 @@ class ReportService {
         avgDuration: 0
       };
     }
+  }
+
+  /**
+   * Get MongoDB collection name based on device type
+   * @private
+   */
+  _getCollectionForDevice(deviceType) {
+    if (!deviceType) return 'gt06locations';
+    const dt = deviceType.toUpperCase();
+    if (dt === 'FMB125' || dt.startsWith('FMB')) return 'fmb125locations';
+    return 'gt06locations'; // GT06 and others default
   }
 
   /**
