@@ -56,7 +56,7 @@ async function getVehicle(imei) {
 
   const v = await Vehicle.findOne({
     where: { imei: candidates },
-    attributes: ['id', 'imei', 'idleThreshold', 'fuelFillThreshold'],
+    attributes: ['id', 'imei', 'idleThreshold', 'fuelFillThreshold', 'deviceType'],
   });
   if (v) {
     // Cache under both the packet IMEI and the stored IMEI so future lookups hit.
@@ -124,6 +124,18 @@ function fmtDuration(secs) {
 // Maximum GPS gap before assuming the vehicle stopped (engine-off packet missed).
 // Uses lastGpsPacketTime so GT06 heartbeats don't count as real GPS activity.
 const MAX_GPS_GAP_MS = 30 * 60 * 1000; // 30 minutes
+
+// ── Trip detection mode flags (read once at module load) ─────────────────────
+// TRIP_ON_IGNITION=true     → split trip on ignition-off; use TRIP_MIN_IDLE_MINUTES
+//                             as the debounce window (default 1 min).  Only if the
+//                             engine stays off for that long is the trip closed.
+//                             Re-ignition within the window resumes the same trip.
+// TRIP_MIN_IDLE_MINUTES=1   → debounce window in minutes (TRIP_ON_IGNITION mode only).
+// TRIP_ON_DURATION=false    → reserved (logic not yet implemented)
+const TRIP_ON_IGNITION = process.env.TRIP_ON_IGNITION === 'true';
+const TRIP_ON_DURATION = process.env.TRIP_ON_DURATION === 'true'; // eslint-disable-line no-unused-vars
+const TRIP_MIN_IDLE_MS = parseInt(process.env.TRIP_MIN_IDLE_MINUTES || '1', 10) * 60 * 1000;
+console.log(`[PacketProcessor] Trip mode — TRIP_ON_IGNITION=${TRIP_ON_IGNITION} TRIP_ON_DURATION=${TRIP_ON_DURATION} TRIP_MIN_IDLE_MINUTES=${TRIP_MIN_IDLE_MS / 60000}`);
 async function processPacket(doc, deviceType) {
   try {
     const imei = doc.imei;
@@ -157,11 +169,21 @@ async function processPacket(doc, deviceType) {
     // GT06 non-GPS packets (STATUS, LOGIN, HEARTBEAT) carry no position data.
     // Running them through the state machine would falsely flip engineOn to false.
     // Only refresh lastPacketTime so "last seen" stays accurate.
+    //
+    // Exception: when TRIP_ON_IGNITION=true, STATUS packets that carry a defined
+    // acc signal must reach the trip state machine so that ignition-off immediately
+    // closes the trip.  lat/lng remain null, so haversine returns 0 and no phantom
+    // distance or route point is added — safe to pass through.
     if (deviceType === 'GT06' && lat === null && lng === null) {
-      let state = await VehicleDeviceState.findOne({ where: { vehicleId } });
-      if (!state) state = await VehicleDeviceState.create({ vehicleId, imei });
-      await VehicleDeviceState.update({ lastPacketTime: packetTime }, { where: { vehicleId } });
-      return;
+      const hasAccSignal = TRIP_ON_IGNITION && doc.acc !== undefined && doc.acc !== null;
+      if (!hasAccSignal) {
+        let state = await VehicleDeviceState.findOne({ where: { vehicleId } });
+        if (!state) state = await VehicleDeviceState.create({ vehicleId, imei });
+        await VehicleDeviceState.update({ lastPacketTime: packetTime }, { where: { vehicleId } });
+        return;
+      }
+      // Fall through — STATUS packet with acc signal, TRIP_ON_IGNITION=true.
+      // lat/lng remain null; haversine(null,...) returns 0 → no phantom distance.
     }
 
     // Get or create device state (must happen before ignition detection so GT06
@@ -176,15 +198,21 @@ async function processPacket(doc, deviceType) {
 
     // Ignition detection:
     //   FMB125 → dedicated ignition/acc signal (reliable)
-    //   GT06   → hysteresis to avoid false trips from speed fluctuating around 5 km/h:
-    //              ON  when acc=true OR speed ≥ 5
-    //              OFF when acc=false AND speed === 0
-    //              Hold current state when acc=false AND 0 < speed < 5
-    //            This prevents a vehicle slowing to 3 km/h in traffic from
-    //            prematurely closing a trip.
+    //   GT06 + TRIP_ON_IGNITION=true → ACC bit is ground truth (no speed override).
+    //     Engine ON  when acc=true
+    //     Engine OFF when acc=false  (even if still moving — e.g. engine cut while rolling)
+    //   GT06 + TRIP_ON_IGNITION=false → speed-based hysteresis (legacy):
+    //     ON  when acc=true OR speed ≥ 5
+    //     OFF when acc=false AND speed === 0
+    //     Hold current state when acc=false AND 0 < speed < 5
+    //     This prevents a vehicle slowing to 3 km/h in traffic from prematurely
+    //     closing a trip, but also means acc=false is ignored at speed ≥ 5.
     let ignitionOn;
     if (deviceType === 'GT06') {
-      if (doc.acc || speed >= 5) {
+      if (TRIP_ON_IGNITION) {
+        // Strict ACC-only: trust the acc bit regardless of speed
+        ignitionOn = !!doc.acc;
+      } else if (doc.acc || speed >= 5) {
         ignitionOn = true;
       } else if (speed === 0) {
         ignitionOn = false;
@@ -236,10 +264,19 @@ async function processPacket(doc, deviceType) {
           ? now - new Date(state.lastGpsPacketTime).getTime()
           : Infinity;
 
-        const isLongStop = engineOffMs >= idleThresholdMs || lastRunningMs >= MAX_GPS_GAP_MS;
+        // TRIP_ON_IGNITION: long stop if engine was off for >= TRIP_MIN_IDLE_MS.
+        // GT06 (no TRIP_ON_IGNITION): always a long stop — ACC hysteresis already
+        //   filtered out traffic-light pauses, so any pendingTripEnd is real.
+        // FMB125: use the per-vehicle idleThreshold window.
+        const dtype = (vehicle.deviceType || '').toUpperCase();
+        const isLongStop = TRIP_ON_IGNITION
+          ? (engineOffMs >= TRIP_MIN_IDLE_MS || lastRunningMs >= MAX_GPS_GAP_MS)
+          : (dtype === 'GT06'
+            ? true
+            : (engineOffMs >= idleThresholdMs || lastRunningMs >= MAX_GPS_GAP_MS));
 
         if (!isLongStop) {
-          // Brief stop (traffic light) — resume existing trip, just start new session
+          // Brief stop (traffic light / brief signal drop) — resume existing trip
           state.pendingTripEnd = false;
           state.engineOffSince = null;
         } else {
@@ -285,14 +322,17 @@ async function processPacket(doc, deviceType) {
       state.engineOnSince = packetTime;
 
     } else if (!ignitionOn && prevEngineOn) {
-      // ── ENGINE TURNED OFF — close session, start idle debounce timer ──────
-      // Do NOT close the trip yet — a traffic light stop should not split the trip.
-      // The trip is closed by STILL OFF once idleThreshold is exceeded.
+      // ── ENGINE TURNED OFF ─────────────────────────────────────────────────
       if (state.currentSessionId) {
         await closeEngineSession(state.currentSessionId, packetTime, lat, lng, fuelLevel, state);
       }
       state.engineOn = false;
       state.currentSessionId = null;
+
+      // Start debounce timer — trip stays open until STILL OFF confirms the engine
+      // has been off for >= TRIP_MIN_IDLE_MS (TRIP_ON_IGNITION mode) or the
+      // per-vehicle idleThreshold (standard mode).  A brief signal glitch that
+      // flips acc=false for one packet must not split the trip.
       state.engineOffSince = packetTime;
       state.pendingTripEnd = true;
 
@@ -301,7 +341,17 @@ async function processPacket(doc, deviceType) {
       const offMs = state.engineOffSince
         ? now - new Date(state.engineOffSince).getTime()
         : Infinity;
-      if (offMs >= idleThresholdMs && state.currentTripId) {
+
+      // TRIP_ON_IGNITION: use short TRIP_MIN_IDLE_MS window (default 1 min).
+      // GT06 without TRIP_ON_IGNITION: 0 ms — ACC hysteresis already filtered
+      //   traffic-light pauses, so any pendingTripEnd is a genuine shutoff.
+      // FMB125: wait for the per-vehicle idleThreshold (default 5 min).
+      const dtype = (vehicle.deviceType || '').toUpperCase();
+      const offThresholdMs = TRIP_ON_IGNITION
+        ? TRIP_MIN_IDLE_MS
+        : (dtype === 'GT06' ? 0 : idleThresholdMs);
+
+      if (offMs >= offThresholdMs && state.currentTripId) {
         // Idle threshold exceeded — finalise trip at the moment speed went to 0
         await closeTripIfActive(state.currentTripId, state.engineOffSince || packetTime);
         state.currentTripId = null;

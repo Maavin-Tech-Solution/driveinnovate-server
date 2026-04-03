@@ -1,45 +1,48 @@
 const vehicleReportService = require('../services/vehicleReport.service');
 const { reprocessVehicle } = require('../services/packetProcessor.service');
 
-// IST is UTC+5:30 = 330 minutes ahead of UTC
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-
 /**
- * Parse a 'YYYY-MM-DD' date string as an IST calendar day and return
- * the corresponding UTC boundary times for database queries.
+ * Parse a date/datetime string as IST and return the corresponding UTC Date.
  *
- * 'YYYY-MM-DD' from date picker is always IST midnight (00:00 IST).
- *   IST midnight  = UTC midnight − 5h30m → subtract IST_OFFSET_MS
- * For the "to" date we want end-of-day IST (23:59:59.999 IST):
- *   IST EoD       = IST midnight + 24h − 1ms
+ * Accepts two formats sent by the UI:
+ *   'YYYY-MM-DD'       → date-only (type="date" input)
+ *   'YYYY-MM-DDTHH:MM' → datetime-local (type="datetime-local" input)
+ *
+ * By appending an explicit +05:30 offset we are timezone-safe regardless of
+ * the server's local timezone (avoids ambiguity of bare datetime strings).
+ *
+ * @param {string}  val    - date or datetime string from the client
+ * @param {boolean} isEnd  - if true and date-only, treat as 23:59:59.999 IST
  */
+function parseISTValue(val, isEnd = false) {
+  if (!val) return null;
+  if (val.length === 10) {
+    // Date-only: YYYY-MM-DD → IST midnight or end-of-day
+    return new Date(val + (isEnd ? 'T23:59:59.999+05:30' : 'T00:00:00+05:30'));
+  }
+  // datetime-local: "YYYY-MM-DDTHH:MM" — append IST offset if none present
+  const suffix = /[Z+\-]\d{2}:?\d{2}$/.test(val) ? '' : '+05:30';
+  return new Date(val + suffix);
+}
+
 function parseRange(query) {
   if (query.from) {
-    // new Date('YYYY-MM-DD') gives UTC midnight; subtract offset → IST midnight in UTC
-    const from = new Date(new Date(query.from).getTime() - IST_OFFSET_MS);
-    const to   = query.to
-      ? new Date(new Date(query.to).getTime() - IST_OFFSET_MS + 24 * 60 * 60 * 1000 - 1)
-      : new Date();
+    const from = parseISTValue(query.from, false);
+    // For date-only "to" values add end-of-day; for datetime-local use exact time.
+    const toIsDateOnly = query.to && query.to.length === 10;
+    const to = query.to ? parseISTValue(query.to, toIsDateOnly) : new Date();
     console.log(`[Report] IST range: ${query.from}→${query.to || 'now'} → UTC: ${from.toISOString()} – ${to.toISOString()}`);
     return { from, to };
   }
-  // Default: last 7 days
-  return {
-    from: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-    to:   new Date(),
-  };
+  return { from: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), to: new Date() };
 }
 
-/**
- * Same IST-aware conversion for reprocess (from request body).
- */
 function parseBodyRange(body) {
   const from = body.from
-    ? new Date(new Date(body.from).getTime() - IST_OFFSET_MS)
+    ? parseISTValue(body.from, false)
     : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const to = body.to
-    ? new Date(new Date(body.to).getTime() - IST_OFFSET_MS + 24 * 60 * 60 * 1000 - 1)
-    : new Date();
+  const toIsDateOnly = body.to && body.to.length === 10;
+  const to = body.to ? parseISTValue(body.to, toIsDateOnly) : new Date();
   return { from, to };
 }
 
@@ -160,6 +163,137 @@ exports.exportExcel = async (req, res) => {
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * GET /api/vehicles/:id/raw-packets?from=DATETIME&to=DATETIME[&fmt=csv|json|xlsx]
+ *
+ * Returns all raw MongoDB location packets for the vehicle in the given time window.
+ * from/to accept both date-only ('YYYY-MM-DD') and datetime-local ('YYYY-MM-DDTHH:MM')
+ * values — both interpreted as IST via parseISTValue().
+ *
+ * fmt=csv  (default) — CSV attachment
+ * fmt=json           — JSON array
+ * fmt=xlsx           — Excel workbook attachment (debug-friendly)
+ */
+exports.getRawPackets = async (req, res) => {
+  try {
+    const { Vehicle } = require('../models');
+    const { getMongoDb } = require('../config/mongodb');
+
+    if (!req.query.from || !req.query.to) {
+      return res.status(400).json({ success: false, message: '`from` and `to` are required' });
+    }
+
+    const vehicle = await Vehicle.findByPk(req.params.id, {
+      attributes: ['id', 'imei', 'vehicleNumber', 'deviceType'],
+    });
+    if (!vehicle || !vehicle.imei) {
+      return res.status(404).json({ success: false, message: 'Vehicle not found or has no IMEI' });
+    }
+
+    // Use the same IST-aware parser as all other report endpoints
+    const { from: fromDate, to: toDate } = parseRange(req.query);
+
+    const imeis = [vehicle.imei];
+    if (vehicle.imei.startsWith('0')) imeis.push(vehicle.imei.slice(1));
+    else imeis.push('0' + vehicle.imei);
+
+    const dtype = (vehicle.deviceType || '').toUpperCase();
+    const collections = dtype.startsWith('FMB')
+      ? [`${dtype.toLowerCase()}locations`]
+      : dtype === 'GT06'
+        ? ['gt06locations']
+        : ['gt06locations', 'fmb125locations'];
+
+    const db = getMongoDb();
+    const docs = [];
+    for (const colName of collections) {
+      try {
+        const cursor = db.collection(colName)
+          .find({ imei: { $in: imeis }, timestamp: { $gte: fromDate, $lte: toDate } })
+          .sort({ timestamp: 1 });
+        for await (const doc of cursor) docs.push(doc);
+      } catch (_) { /* collection may not exist */ }
+    }
+
+    const fmt = (req.query.fmt || 'csv').toLowerCase();
+    const vnum = vehicle.vehicleNumber || req.params.id;
+    const IST_MS = 5.5 * 60 * 60 * 1000;
+    const toISTStr = (d) => {
+      if (!d) return '';
+      return new Date(new Date(d).getTime() + IST_MS).toISOString().replace('T', ' ').slice(0, 19) + ' IST';
+    };
+
+    // Shared column definitions
+    const COLS = [
+      { key: 'timestamp',  label: 'Timestamp (IST)',  get: d => toISTStr(d.timestamp) },
+      { key: 'packetType', label: 'Packet Type',       get: d => d.packetType || '' },
+      { key: 'protocol',   label: 'Protocol',          get: d => d.protocol   || '' },
+      { key: 'latitude',   label: 'Latitude',          get: d => d.latitude   ?? '' },
+      { key: 'longitude',  label: 'Longitude',         get: d => d.longitude  ?? '' },
+      { key: 'speed',      label: 'Speed (km/h)',      get: d => d.speed      ?? '' },
+      { key: 'acc',        label: 'ACC/Ignition',      get: d => d.acc        != null ? String(d.acc) : '' },
+      { key: 'gpsFixed',   label: 'GPS Fixed',         get: d => d.gpsFixed   != null ? String(d.gpsFixed) : '' },
+      { key: 'satellites', label: 'Satellites',        get: d => d.satellites ?? '' },
+      { key: 'course',     label: 'Course (°)',        get: d => d.course     ?? '' },
+      { key: 'mcc',        label: 'MCC',               get: d => d.mcc        ?? '' },
+      { key: 'mnc',        label: 'MNC',               get: d => d.mnc        ?? '' },
+      { key: 'lac',        label: 'LAC',               get: d => d.lac        ?? '' },
+      { key: 'cellId',     label: 'Cell ID',           get: d => d.cellId     ?? '' },
+      { key: 'alarm',      label: 'Alarm',             get: d => d.alarm      || '' },
+      { key: 'raw',        label: 'Raw Hex',           get: d => d.raw        || '' },
+    ];
+
+    if (fmt === 'json') {
+      return res.json({ success: true, count: docs.length, data: docs });
+    }
+
+    if (fmt === 'xlsx') {
+      const ExcelJS = require('exceljs');
+      const wb = new ExcelJS.Workbook();
+      wb.creator = 'DriveInnovate';
+      const ws = wb.addWorksheet('Packets');
+
+      ws.columns = COLS.map(c => ({ header: c.label, key: c.key, width: 22 }));
+
+      // Style header row
+      const hdr = ws.getRow(1);
+      hdr.eachCell(cell => {
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1e3a5f' } };
+        cell.alignment = { horizontal: 'center' };
+      });
+
+      for (const d of docs) {
+        const row = {};
+        for (const c of COLS) row[c.key] = c.get(d);
+        ws.addRow(row);
+      }
+
+      // Freeze header, auto-filter
+      ws.views = [{ state: 'frozen', ySplit: 1 }];
+      ws.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + COLS.length)}1` };
+
+      const filename = `packets_${vnum}_${req.query.from.slice(0, 10)}.xlsx`;
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      const buf = await wb.xlsx.writeBuffer();
+      return res.send(buf);
+    }
+
+    // ── CSV (default) ──
+    const rows = [COLS.map(c => c.label).join(',')];
+    for (const d of docs) {
+      rows.push(COLS.map(c => `"${String(c.get(d)).replace(/"/g, '""')}"`).join(','));
+    }
+    const filename = `packets_${vnum}_${req.query.from.slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(rows.join('\r\n'));
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
