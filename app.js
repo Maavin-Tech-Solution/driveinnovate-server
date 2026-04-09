@@ -21,7 +21,8 @@ const allowedOrigins = [
   'https://driveinnovate.in',
   'https://www.driveinnovate.in',
   'https://stage.driveinnovate.in',
-  'http://localhost:64620'
+  'http://localhost:64620',
+  'https://master.d2frc3czi74u9j.amplifyapp.com'
 ];
 
 const corsOptions = {
