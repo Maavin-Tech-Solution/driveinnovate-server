@@ -9,6 +9,7 @@ const { connectMongoDB, getMongoDb } = require('./src/config/mongodb');
 const { processPacket } = require('./src/services/packetProcessor.service');
 const { startAlertEngine } = require('./src/services/alertEngine.service');
 const { seedBuiltIns } = require('./src/services/master.service');
+const { runMigrations } = require('./src/config/migrate');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -82,6 +83,7 @@ sequelize
     console.log('MySQL Database connected successfully.');
     return sequelize.sync({ alter: false });
   })
+  .then(() => runMigrations())
   .then(() => seedBuiltIns().then(() => console.log('✓ Built-in device configs seeded')))
   .then(() => {
     console.log('Attempting MongoDB connection for GPS data...');
