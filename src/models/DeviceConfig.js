@@ -40,6 +40,25 @@ const DeviceConfig = sequelize.define(
       defaultValue: false,
       comment: 'Built-in devices (GT06, FMB125) cannot be deleted',
     },
+    /**
+     * JSON snapshot of the device's capability flags (mirrors deviceCapabilities.js).
+     * Stored here so the frontend and API can read capabilities without importing
+     * the server-side config module.  Populated automatically on seedBuiltIns().
+     *
+     * Shape: {
+     *   ignitionSource: 'acc-hysteresis' | 'acc-strict' | 'ignition-io',
+     *   supportsGps, supportsAltitude, supportsSatellites,
+     *   supportsBattery, supportsExternalVoltage,
+     *   supportsOdometer, supportsFuel, supportsRpm, supportsTemperature,
+     *   supportsGsmSignal, supportsDigitalInputs, supportsAnalogInputs, supportsCustomIo
+     * }
+     */
+    capabilities: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      defaultValue: null,
+      comment: 'Capability flags snapshot — see deviceCapabilities.js',
+    },
   },
   {
     tableName: 'di_device_config',

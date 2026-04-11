@@ -1,13 +1,53 @@
 /**
  * PacketProcessor — real-time state machine for vehicle tracking data.
- *
+ * ─────────────────────────────────────────────────────────────────────────────
  * Called for every new GPS packet (via MongoDB change stream OR batch reprocessing).
- * Updates:
+ *
+ * Works with any device type by delegating raw-packet normalization to
+ * packetNormalizer.service.js.  Device-specific ignition logic is controlled
+ * by the device's capability descriptor (deviceCapabilities.js), NOT by
+ * if/else chains inside this file.
+ *
+ * Updates per packet:
+ *   vehicle_device_states    — live state tracker (one row per vehicle)
  *   vehicle_engine_sessions  — each ignition-on/off period
  *   trips                    — logical journeys (sessions grouped by idle threshold)
- *   stops                    — parking events
  *   vehicle_fuel_events      — fuel fill / drain detections
- *   vehicle_device_states    — live state tracker (one row per vehicle)
+ *
+ * ── Trip state machine overview ───────────────────────────────────────────────
+ *
+ *   ENGINE ON  (ignitionOn=true, prevEngineOn=false)
+ *     → Start a new trip.  If pendingTripEnd=true AND the engine-off gap was
+ *       < idleThreshold, RESUME the existing trip (traffic-light stop).
+ *       If gap >= idleThreshold, close the lingering trip and start a new one.
+ *
+ *   ENGINE OFF (ignitionOn=false, prevEngineOn=true)
+ *     → Close the engine session.  Set pendingTripEnd + start idle debounce.
+ *       The trip stays open — a brief stop must not split a trip.
+ *
+ *   STILL OFF  (ignitionOn=false, pendingTripEnd=true)
+ *     → Once engine-off gap >= idleThreshold, close the trip.
+ *
+ *   STILL ON   (ignitionOn=true, prevEngineOn=true)
+ *     → Accumulate distance, update route / speed / times.
+ *     → Gap detection: no GPS packet for > MAX_GPS_GAP_MS → assume silent shutoff.
+ *
+ * ── Ignition detection ────────────────────────────────────────────────────────
+ *   Controlled by device capability `ignitionSource`:
+ *
+ *   'ignition-io'      (FMB125, FMB920, AIS140)
+ *     → normalizer already resolved doc.ignition; use it directly.
+ *       ignitionOn = pkt.ignition
+ *
+ *   'acc-strict'       (GT06 with TRIP_ON_IGNITION=true)
+ *     → Trust ACC bit regardless of speed.
+ *       ignitionOn = pkt.ignition (= !!doc.acc from normalizer)
+ *
+ *   'acc-hysteresis'   (GT06 without TRIP_ON_IGNITION / generic fallback)
+ *     → Speed-based hysteresis to suppress traffic-light flicker:
+ *       ON  when acc=true OR speed ≥ 5 km/h
+ *       OFF when acc=false AND speed === 0
+ *       HOLD (keep previous) when 0 < speed < 5 km/h
  */
 
 const { Op } = require('sequelize');
@@ -17,10 +57,54 @@ const {
   VehicleEngineSession,
   VehicleFuelEvent,
   Trip,
-  Stop,  // used in reprocessVehicle to delete old stops when reprocessing
+  Stop,
 } = require('../models');
+const { normalizePacket }   = require('./packetNormalizer.service');
+const { getCapabilities }   = require('../config/deviceCapabilities');
 
-// ─── Haversine distance (km) ────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+// Maximum GPS gap before assuming the vehicle stopped (engine-off packet missed).
+const MAX_GPS_GAP_MS = 30 * 60 * 1000; // 30 minutes
+
+// Trip detection mode (env-driven, read once at startup)
+const TRIP_ON_IGNITION = process.env.TRIP_ON_IGNITION === 'true';
+const TRIP_MIN_IDLE_MS = parseInt(process.env.TRIP_MIN_IDLE_MINUTES || '1', 10) * 60 * 1000;
+console.log(`[PacketProcessor] TRIP_ON_IGNITION=${TRIP_ON_IGNITION}  TRIP_MIN_IDLE_MINUTES=${TRIP_MIN_IDLE_MS / 60000}`);
+
+// Minimum movement speed (km/h) to count a segment as "driving" vs "idling"
+const DRIVING_SPEED_THRESHOLD = 2;
+
+// ─── Vehicle lookup cache (imei → Vehicle row) ────────────────────────────────
+const vehicleCache = new Map();
+
+async function getVehicle(imei) {
+  if (vehicleCache.has(imei)) return vehicleCache.get(imei);
+  const candidates = [imei];
+  if (imei.startsWith('0')) candidates.push(imei.slice(1));
+  else candidates.push('0' + imei);
+
+  const v = await Vehicle.findOne({
+    where: { imei: candidates },
+    attributes: ['id', 'imei', 'idleThreshold', 'fuelFillThreshold', 'deviceType'],
+  });
+  if (v) {
+    vehicleCache.set(imei, v);
+    vehicleCache.set(v.imei, v);
+  }
+  return v;
+}
+
+function invalidateVehicleCache(imei) {
+  vehicleCache.delete(imei);
+  if (imei?.startsWith('0')) vehicleCache.delete(imei.slice(1));
+  else if (imei) vehicleCache.delete('0' + imei);
+}
+
+// ─── Reprocess lock ───────────────────────────────────────────────────────────
+const reprocessingVehicles = new Set();
+
+// ─── Haversine distance (km) ──────────────────────────────────────────────────
 function haversine(lat1, lng1, lat2, lng2) {
   if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
   const R = 6371;
@@ -34,262 +118,144 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// ─── Vehicle lookup cache (IMEI → Vehicle row) ──────────────────────────────
-const vehicleCache = new Map(); // imei → { id, idleThreshold, fuelFillThreshold }
-
-// ─── Reprocess lock ─────────────────────────────────────────────────────────
-// Vehicle IDs currently being reprocessed.  Live change-stream packets for
-// these vehicles are skipped to prevent the race condition where a live
-// current-time packet overwrites reprocess state mid-run, producing negative
-// trip / engine-hour durations.
-const reprocessingVehicles = new Set();
-
-async function getVehicle(imei) {
-  if (vehicleCache.has(imei)) return vehicleCache.get(imei);
-
-  // Build candidate list: try exact IMEI, then with/without leading zero.
-  // GT06 devices often store IMEI without leading zero in MongoDB while the
-  // vehicle record stores it with the leading zero (and vice-versa).
-  const candidates = [imei];
-  if (imei.startsWith('0')) candidates.push(imei.slice(1));
-  else candidates.push('0' + imei);
-
-  const v = await Vehicle.findOne({
-    where: { imei: candidates },
-    attributes: ['id', 'imei', 'idleThreshold', 'fuelFillThreshold', 'deviceType'],
-  });
-  if (v) {
-    // Cache under both the packet IMEI and the stored IMEI so future lookups hit.
-    vehicleCache.set(imei, v);
-    vehicleCache.set(v.imei, v);
-  }
-  return v;
-}
-
-// Invalidate cache when vehicle is updated (clears both leading-zero variants)
-function invalidateVehicleCache(imei) {
-  vehicleCache.delete(imei);
-  if (imei.startsWith('0')) vehicleCache.delete(imei.slice(1));
-  else vehicleCache.delete('0' + imei);
-}
-
-// ─── Format seconds → "H:MM:SS" ─────────────────────────────────────────────
-function fmtDuration(secs) {
-  if (!secs) return '0:00:00';
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = secs % 60;
-  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-// ─── Main packet processor ───────────────────────────────────────────────────
+// ─── Ignition detection ───────────────────────────────────────────────────────
 /**
- * Process a single GPS packet document from MongoDB.
- *
- * ── Common trip definition (applies to ALL device types) ──────────────────────
- *
- *   ENGINE ON  (ignitionOn=true, prevEngineOn=false)
- *     → Start a new trip.  If the vehicle was in an idle-debounce (pendingTripEnd)
- *       and the engine-off gap was < idleThreshold, RESUME the existing trip instead
- *       (traffic-light stop).  If the gap was ≥ idleThreshold, close the lingering
- *       trip first and then start a new one.
- *
- *   ENGINE OFF (ignitionOn=false, prevEngineOn=true)
- *     → Close the engine session.  Set pendingTripEnd=true and start the idle timer
- *       (engineOffSince).  The trip stays open — a brief stop must not split a trip.
- *
- *   STILL OFF  (ignitionOn=false, pendingTripEnd=true)
- *     → Once the engine-off gap exceeds idleThreshold, close the trip.
- *
- *   STILL ON   (ignitionOn=true, prevEngineOn=true)
- *     → Accumulate distance, update route / speed / duration.
- *     → Gap detection: if no GPS packet has been received for > MAX_GPS_GAP_MS
- *       (default 30 min), assume the engine was silently turned off during the
- *       gap (packet lost or device slept).  Close the previous trip at the last
- *       known GPS timestamp and start a fresh one for the current engine-on period.
- *       lastGpsPacketTime (not lastPacketTime) is used so that GT06 heartbeat /
- *       status packets do not mask genuine gaps.
- *
- * Ignition detection per device type:
- *   FMB125 → uses explicit doc.ignition boolean (Teltonika IO element 239)
- *   GT06   → speed-based with hysteresis to avoid traffic-light flicker:
- *              ON  when acc=true OR speed ≥ 5 km/h
- *              OFF when acc=false AND speed === 0
- *              HOLD (keep previous state) when speed is 1–4 km/h
- *
- * @param {Object} doc        - MongoDB document (fmb125locations or gt06locations)
- * @param {string} deviceType - 'FMB125' | 'GT06'
+ * Resolve current ignition state from a normalized packet.
+ * Returns true/false (never null) by falling back to prevEngineOn when ambiguous.
  */
+function resolveIgnition(pkt, caps, prevEngineOn) {
+  // For devices with a dedicated ignition IO element (FMB125, FMB920, AIS140)
+  // the normalizer sets pkt.ignition from the reliable IO signal.
+  if (caps.ignitionSource === 'ignition-io') {
+    return pkt.ignition !== null ? pkt.ignition : prevEngineOn;
+  }
 
-// Maximum GPS gap before assuming the vehicle stopped (engine-off packet missed).
-// Uses lastGpsPacketTime so GT06 heartbeats don't count as real GPS activity.
-const MAX_GPS_GAP_MS = 30 * 60 * 1000; // 30 minutes
+  // GT06 with TRIP_ON_IGNITION=true — strict ACC bit
+  if (caps.ignitionSource === 'acc-strict' || TRIP_ON_IGNITION) {
+    return pkt.ignition !== null ? pkt.ignition : prevEngineOn;
+  }
 
-// ── Trip detection mode flags (read once at module load) ─────────────────────
-// TRIP_ON_IGNITION=true     → split trip on ignition-off; use TRIP_MIN_IDLE_MINUTES
-//                             as the debounce window (default 1 min).  Only if the
-//                             engine stays off for that long is the trip closed.
-//                             Re-ignition within the window resumes the same trip.
-// TRIP_MIN_IDLE_MINUTES=1   → debounce window in minutes (TRIP_ON_IGNITION mode only).
-// TRIP_ON_DURATION=false    → reserved (logic not yet implemented)
-const TRIP_ON_IGNITION = process.env.TRIP_ON_IGNITION === 'true';
-const TRIP_ON_DURATION = process.env.TRIP_ON_DURATION === 'true'; // eslint-disable-line no-unused-vars
-const TRIP_MIN_IDLE_MS = parseInt(process.env.TRIP_MIN_IDLE_MINUTES || '1', 10) * 60 * 1000;
-console.log(`[PacketProcessor] Trip mode — TRIP_ON_IGNITION=${TRIP_ON_IGNITION} TRIP_ON_DURATION=${TRIP_ON_DURATION} TRIP_MIN_IDLE_MINUTES=${TRIP_MIN_IDLE_MS / 60000}`);
+  // acc-hysteresis (GT06 legacy / generic fallback)
+  const speed = pkt.speed || 0;
+  const acc   = pkt.ignition; // normalizer maps acc→ignition for GT06
+  if (acc === true || speed >= 5) return true;
+  if (acc === false && speed === 0) return false;
+  return prevEngineOn; // hold — ambiguous speed range (1–4 km/h)
+}
+
+// ─── Main processor ───────────────────────────────────────────────────────────
+/**
+ * Process a single raw MongoDB document.
+ *
+ * @param {object} doc        Raw MongoDB document from any device collection
+ * @param {string} deviceType e.g. 'GT06', 'FMB125', 'FMB920', 'AIS140'
+ */
 async function processPacket(doc, deviceType) {
   try {
-    const imei = doc.imei;
-    if (!imei) {
+    if (!doc?.imei) {
       console.warn(`[PacketProcessor:${deviceType}] Packet missing IMEI, skipping`);
       return;
     }
 
+    // ── 1. Normalize raw packet to common shape ────────────────────────────
+    const pkt  = normalizePacket(doc, deviceType);
+    const caps = getCapabilities(deviceType);
+    const imei = pkt.imei;
+
+    // ── 2. Resolve vehicle ─────────────────────────────────────────────────
     const vehicle = await getVehicle(imei);
     if (!vehicle) {
-      console.warn(`[PacketProcessor:${deviceType}] No vehicle found for IMEI "${imei}", skipping`);
+      console.warn(`[PacketProcessor:${deviceType}] No vehicle for IMEI "${imei}", skipping`);
+      return;
+    }
+    const vehicleId = vehicle.id;
+    if (reprocessingVehicles.has(vehicleId)) return;
+
+    const idleThresholdMs   = (vehicle.idleThreshold  || 5) * 60 * 1000;
+    const fuelFillThreshold = vehicle.fuelFillThreshold || 5;
+
+    // ── 3. Status-only packets (GT06 STATUS 0x13 without ACC signal) ───────
+    // These have no GPS and no ignition signal.  Only refresh lastPacketTime.
+    // Exception: when TRIP_ON_IGNITION=true and packet carries a valid ignition
+    // signal, let it fall through so the state machine can close/open trips.
+    if (pkt.isStatusOnly && pkt.ignition === null) {
+      let state = await VehicleDeviceState.findOne({ where: { vehicleId } });
+      if (!state) state = await VehicleDeviceState.create({ vehicleId, imei });
+      await VehicleDeviceState.update({ lastPacketTime: pkt.timestamp }, { where: { vehicleId } });
       return;
     }
 
-    const vehicleId = vehicle.id;
-
-    // Skip live packets while a reprocess is running for this vehicle
-    if (reprocessingVehicles.has(vehicleId)) return;
-
-    const idleThresholdMs = (vehicle.idleThreshold || 5) * 60 * 1000;
-    const fuelFillThreshold = vehicle.fuelFillThreshold || 5;
-
-    // Extract packet fields (normalise FMB125 vs GT06)
-    const packetTime = new Date(doc.timestamp || doc.serverTimestamp || Date.now());
-    const lat = parseFloat(doc.latitude) || null;
-    const lng = parseFloat(doc.longitude) || null;
-    const speed = parseFloat(doc.speed) || 0;
-    const fuelLevel = doc.fuelLevel !== undefined && doc.fuelLevel !== null ? parseFloat(doc.fuelLevel) : null;
-    const odometer = doc.totalOdometer || doc.mileage || null;
-
-    // GT06 non-GPS packets (STATUS, LOGIN, HEARTBEAT) carry no position data.
-    // Running them through the state machine would falsely flip engineOn to false.
-    // Only refresh lastPacketTime so "last seen" stays accurate.
-    //
-    // Exception: when TRIP_ON_IGNITION=true, STATUS packets that carry a defined
-    // acc signal must reach the trip state machine so that ignition-off immediately
-    // closes the trip.  lat/lng remain null, so haversine returns 0 and no phantom
-    // distance or route point is added — safe to pass through.
-    if (deviceType === 'GT06' && lat === null && lng === null) {
-      const hasAccSignal = TRIP_ON_IGNITION && doc.acc !== undefined && doc.acc !== null;
-      if (!hasAccSignal) {
-        let state = await VehicleDeviceState.findOne({ where: { vehicleId } });
-        if (!state) state = await VehicleDeviceState.create({ vehicleId, imei });
-        await VehicleDeviceState.update({ lastPacketTime: packetTime }, { where: { vehicleId } });
-        return;
-      }
-      // Fall through — STATUS packet with acc signal, TRIP_ON_IGNITION=true.
-      // lat/lng remain null; haversine(null,...) returns 0 → no phantom distance.
-    }
-
-    // Get or create device state (must happen before ignition detection so GT06
-    // hysteresis can reference the previous engine state)
+    // ── 4. Get or create device state ──────────────────────────────────────
     let state = await VehicleDeviceState.findOne({ where: { vehicleId } });
-    if (!state) {
-      state = await VehicleDeviceState.create({ vehicleId, imei });
-    }
+    if (!state) state = await VehicleDeviceState.create({ vehicleId, imei });
 
-    const prevEngineOn = state.engineOn;
+    const prevEngineOn  = state.engineOn;
     const prevFuelLevel = state.lastFuelLevel;
 
-    // Ignition detection:
-    //   FMB125 → dedicated ignition/acc signal (reliable)
-    //   GT06 + TRIP_ON_IGNITION=true → ACC bit is ground truth (no speed override).
-    //     Engine ON  when acc=true
-    //     Engine OFF when acc=false  (even if still moving — e.g. engine cut while rolling)
-    //   GT06 + TRIP_ON_IGNITION=false → speed-based hysteresis (legacy):
-    //     ON  when acc=true OR speed ≥ 5
-    //     OFF when acc=false AND speed === 0
-    //     Hold current state when acc=false AND 0 < speed < 5
-    //     This prevents a vehicle slowing to 3 km/h in traffic from prematurely
-    //     closing a trip, but also means acc=false is ignored at speed ≥ 5.
-    let ignitionOn;
-    if (deviceType === 'GT06') {
-      if (TRIP_ON_IGNITION) {
-        // Strict ACC-only: trust the acc bit regardless of speed
-        ignitionOn = !!doc.acc;
-      } else if (doc.acc || speed >= 5) {
-        ignitionOn = true;
-      } else if (speed === 0) {
-        ignitionOn = false;
-      } else {
-        ignitionOn = prevEngineOn; // hold — speed is 1–4 km/h, ambiguous
-      }
-    } else {
-      ignitionOn = !!(doc.ignition || doc.acc);
-    }
+    // ── 5. Resolve ignition from normalized packet + device strategy ────────
+    const ignitionOn = resolveIgnition(pkt, caps, prevEngineOn);
 
-    console.log(`[PacketProcessor:${deviceType}] imei=${imei} vehicleId=${vehicleId} ignition=${ignitionOn} acc=${doc.acc} speed=${speed} lat=${lat} lng=${lng} ts=${packetTime.toISOString()}`);
-    const now = packetTime.getTime();
+    console.log(
+      `[PacketProcessor:${deviceType}] imei=${imei} vehicleId=${vehicleId} ` +
+      `ignition=${ignitionOn} speed=${pkt.speed} lat=${pkt.lat} lng=${pkt.lng} ` +
+      `fuel=${pkt.fuel} odo=${pkt.odometer} ts=${pkt.timestamp.toISOString()}`
+    );
 
-    // ── Fuel event detection ────────────────────────────────────────────────
-    if (fuelLevel !== null && prevFuelLevel !== null) {
-      const diff = fuelLevel - prevFuelLevel;
+    const now = pkt.timestamp.getTime();
+
+    // ── 6. Fuel event detection ─────────────────────────────────────────────
+    if (pkt.fuel !== null && prevFuelLevel !== null) {
+      const diff = pkt.fuel - prevFuelLevel;
       if (diff >= fuelFillThreshold) {
         await VehicleFuelEvent.create({
-          vehicleId, imei, eventType: 'fill', eventTime: packetTime,
-          fuelBefore: prevFuelLevel, fuelAfter: fuelLevel, fuelChangePct: diff,
-          latitude: lat, longitude: lng,
+          vehicleId, imei, eventType: 'fill', eventTime: pkt.timestamp,
+          fuelBefore: prevFuelLevel, fuelAfter: pkt.fuel, fuelChangePct: diff,
+          latitude: pkt.lat, longitude: pkt.lng,
         });
       } else if (diff <= -(fuelFillThreshold * 2)) {
         await VehicleFuelEvent.create({
-          vehicleId, imei, eventType: 'drain', eventTime: packetTime,
-          fuelBefore: prevFuelLevel, fuelAfter: fuelLevel, fuelChangePct: Math.abs(diff),
-          latitude: lat, longitude: lng,
+          vehicleId, imei, eventType: 'drain', eventTime: pkt.timestamp,
+          fuelBefore: prevFuelLevel, fuelAfter: pkt.fuel, fuelChangePct: Math.abs(diff),
+          latitude: pkt.lat, longitude: pkt.lng,
         });
       }
     }
 
-    // ── Trip state machine ──────────────────────────────────────────────────
+    // ── 7. Trip state machine ───────────────────────────────────────────────
 
     if (ignitionOn && !prevEngineOn) {
-      // ── ENGINE TURNED ON ──────────────────────────────────────────────────
+      // ── ENGINE TURNED ON ────────────────────────────────────────────────
       if (state.pendingTripEnd && state.currentTripId) {
-        // engineOffMs  — time since the ENGINE OFF packet was processed.
-        // lastRunningMs — time since the last packet where ignition was ON.
-        //
-        // These differ when a device sends a "wake-up / parking" packet with
-        // ignition=false just before an afternoon restart (FMB125 sleep mode).
-        // In that case engineOffMs may be only 1–2 minutes even though the
-        // vehicle actually stopped hours earlier.  Using lastGpsPacketTime
-        // (which is NOT updated on ignitionOff packets) gives the true gap.
-        const engineOffMs = state.engineOffSince
-          ? now - new Date(state.engineOffSince).getTime()
-          : Infinity;
+        const engineOffMs   = state.engineOffSince
+          ? now - new Date(state.engineOffSince).getTime() : Infinity;
         const lastRunningMs = state.lastGpsPacketTime
-          ? now - new Date(state.lastGpsPacketTime).getTime()
-          : Infinity;
+          ? now - new Date(state.lastGpsPacketTime).getTime() : Infinity;
 
-        // TRIP_ON_IGNITION: long stop if engine was off for >= TRIP_MIN_IDLE_MS.
-        // GT06 (no TRIP_ON_IGNITION): always a long stop — ACC hysteresis already
-        //   filtered out traffic-light pauses, so any pendingTripEnd is real.
-        // FMB125: use the per-vehicle idleThreshold window.
-        const dtype = (vehicle.deviceType || '').toUpperCase();
+        // Determine whether this was a long stop or a brief traffic-light pause.
+        // Strategy depends on mode:
+        //   TRIP_ON_IGNITION: long if off >= TRIP_MIN_IDLE_MS or GPS gap too big
+        //   acc-hysteresis (GT06 legacy): hysteresis already filtered traffic stops
+        //     so any pendingTripEnd is always treated as a long stop
+        //   ignition-io (FMB, AIS): respect per-vehicle idleThreshold
         const isLongStop = TRIP_ON_IGNITION
           ? (engineOffMs >= TRIP_MIN_IDLE_MS || lastRunningMs >= MAX_GPS_GAP_MS)
-          : (dtype === 'GT06'
+          : (caps.ignitionSource === 'acc-hysteresis'
             ? true
             : (engineOffMs >= idleThresholdMs || lastRunningMs >= MAX_GPS_GAP_MS));
 
         if (!isLongStop) {
-          // Brief stop (traffic light / brief signal drop) — resume existing trip
+          // Brief stop — resume existing trip
           state.pendingTripEnd = false;
           state.engineOffSince = null;
         } else {
-          // Long stop — close the lingering trip.  Use lastGpsPacketTime as
-          // the trip end if it predates engineOffSince (i.e. the parking packet
-          // arrived long after the vehicle actually stopped).
+          // Long stop — close lingering trip
           const tripEndTime =
             state.lastGpsPacketTime && state.engineOffSince &&
             new Date(state.lastGpsPacketTime) < new Date(state.engineOffSince)
               ? new Date(state.lastGpsPacketTime)
-              : state.engineOffSince || packetTime;
+              : state.engineOffSince || pkt.timestamp;
           await closeTripIfActive(state.currentTripId, tripEndTime);
-          state.currentTripId = null;
+          state.currentTripId  = null;
           state.pendingTripEnd = false;
           state.engineOffSince = null;
         }
@@ -299,77 +265,61 @@ async function processPacket(doc, deviceType) {
       if (!state.currentTripId) {
         const newTrip = await Trip.create({
           vehicleId, imei,
-          startTime: packetTime, endTime: packetTime,
+          startTime: pkt.timestamp, endTime: pkt.timestamp,
           duration: 0, distance: 0,
-          startLatitude: lat, startLongitude: lng,
-          avgSpeed: 0, maxSpeed: 0, idleTime: 0, fuelConsumed: null,
-          routeData: lat ? [{ lat, lng, ts: packetTime.toISOString(), spd: speed }] : [],
+          startLatitude: pkt.lat, startLongitude: pkt.lng,
+          avgSpeed: 0, maxSpeed: 0,
+          drivingTimeSeconds: 0, engineIdleSeconds: 0, idleTime: 0,
+          stoppageCount: 0, fuelConsumed: null,
+          odometerStart: pkt.odometer || null,
+          routeData: pkt.lat ? [{ lat: pkt.lat, lng: pkt.lng, ts: pkt.timestamp.toISOString(), spd: pkt.speed }] : [],
         });
         state.currentTripId = newTrip.id;
       }
 
-      // Always start a new engine session for this ON period
+      // Start a new engine session
       const newSession = await VehicleEngineSession.create({
         vehicleId, imei,
-        startTime: packetTime,
-        startLatitude: lat, startLongitude: lng,
-        startFuelLevel: fuelLevel,
+        startTime: pkt.timestamp,
+        startLatitude: pkt.lat, startLongitude: pkt.lng,
+        startFuelLevel: pkt.fuel,
+        odometerStart: pkt.odometer || null,
         tripId: state.currentTripId,
-        distanceKm: 0, status: 'active',
+        distanceKm: 0, drivingSeconds: 0, idleSeconds: 0, status: 'active',
       });
       state.currentSessionId = newSession.id;
-      state.engineOn = true;
-      state.engineOnSince = packetTime;
+      state.engineOn         = true;
+      state.engineOnSince    = pkt.timestamp;
 
     } else if (!ignitionOn && prevEngineOn) {
-      // ── ENGINE TURNED OFF ─────────────────────────────────────────────────
+      // ── ENGINE TURNED OFF ───────────────────────────────────────────────
       if (state.currentSessionId) {
-        await closeEngineSession(state.currentSessionId, packetTime, lat, lng, fuelLevel, state);
+        await closeEngineSession(state.currentSessionId, pkt.timestamp, pkt.lat, pkt.lng, pkt.fuel, pkt.odometer, state);
       }
-      state.engineOn = false;
+      state.engineOn         = false;
       state.currentSessionId = null;
-
-      // Start debounce timer — trip stays open until STILL OFF confirms the engine
-      // has been off for >= TRIP_MIN_IDLE_MS (TRIP_ON_IGNITION mode) or the
-      // per-vehicle idleThreshold (standard mode).  A brief signal glitch that
-      // flips acc=false for one packet must not split the trip.
-      state.engineOffSince = packetTime;
-      state.pendingTripEnd = true;
+      state.engineOffSince   = pkt.timestamp;
+      state.pendingTripEnd   = true;
 
     } else if (!ignitionOn && state.pendingTripEnd) {
-      // ── STILL OFF — check idle threshold ─────────────────────────────────
+      // ── STILL OFF — check idle threshold ───────────────────────────────
       const offMs = state.engineOffSince
-        ? now - new Date(state.engineOffSince).getTime()
-        : Infinity;
+        ? now - new Date(state.engineOffSince).getTime() : Infinity;
 
-      // TRIP_ON_IGNITION: use short TRIP_MIN_IDLE_MS window (default 1 min).
-      // GT06 without TRIP_ON_IGNITION: 0 ms — ACC hysteresis already filtered
-      //   traffic-light pauses, so any pendingTripEnd is a genuine shutoff.
-      // FMB125: wait for the per-vehicle idleThreshold (default 5 min).
-      const dtype = (vehicle.deviceType || '').toUpperCase();
       const offThresholdMs = TRIP_ON_IGNITION
         ? TRIP_MIN_IDLE_MS
-        : (dtype === 'GT06' ? 0 : idleThresholdMs);
+        : (caps.ignitionSource === 'acc-hysteresis' ? 0 : idleThresholdMs);
 
       if (offMs >= offThresholdMs && state.currentTripId) {
-        // Idle threshold exceeded — finalise trip at the moment speed went to 0
-        await closeTripIfActive(state.currentTripId, state.engineOffSince || packetTime);
-        state.currentTripId = null;
+        await closeTripIfActive(state.currentTripId, state.engineOffSince || pkt.timestamp);
+        state.currentTripId  = null;
         state.pendingTripEnd = false;
       }
 
     } else if (ignitionOn && prevEngineOn) {
-      // ── ENGINE STILL ON — accumulate distance and update active trip ───────
+      // ── ENGINE STILL ON — accumulate ────────────────────────────────────
 
-      // Gap detection: if lastGpsPacketTime is set and the gap since the last
-      // real GPS packet exceeds MAX_GPS_GAP_MS, assume the engine was quietly
-      // turned off during the silence (packet lost / device slept without sending
-      // an engine-off record).  Close the previous trip and session at the last
-      // known GPS moment; the recovery block below will then open a fresh trip.
-      //
-      // lastGpsPacketTime starts as null after a clean reprocess (priorContext
-      // case), so this check is safely skipped for the very first packet of a
-      // reprocessing run — preventing false splits at range boundaries.
+      // Gap detection: if no real GPS for > MAX_GPS_GAP_MS, assume silent shutoff
       const gapCheckTime = state.lastGpsPacketTime;
       if (gapCheckTime) {
         const gapMs = now - new Date(gapCheckTime).getTime();
@@ -379,27 +329,27 @@ async function processPacket(doc, deviceType) {
             state.currentTripId = null;
           }
           if (state.currentSessionId) {
-            await closeEngineSession(state.currentSessionId, new Date(gapCheckTime), state.lastLat, state.lastLng, state.lastFuelLevel, state);
+            await closeEngineSession(state.currentSessionId, new Date(gapCheckTime), state.lastLat, state.lastLng, state.lastFuelLevel, null, state);
             state.currentSessionId = null;
           }
           state.pendingTripEnd = false;
-          state.engineOnSince = packetTime; // fresh engine-on moment after the gap
+          state.engineOnSince  = pkt.timestamp;
         }
       }
 
-      // Recovery: reprocessing restores prior state with engineOn=true but
-      // currentTripId/currentSessionId=null (original records fell outside the
-      // reprocessed range). Create them so the machine can continue from where
-      // the vehicle left off.
+      // Recovery: engine was ON at start of reprocess range but records were deleted
       let justCreated = false;
       if (!state.currentTripId) {
         const newTrip = await Trip.create({
           vehicleId, imei,
-          startTime: state.engineOnSince || packetTime, endTime: packetTime,
+          startTime: state.engineOnSince || pkt.timestamp, endTime: pkt.timestamp,
           duration: 0, distance: 0,
-          startLatitude: state.lastLat || lat, startLongitude: state.lastLng || lng,
-          avgSpeed: 0, maxSpeed: 0, idleTime: 0, fuelConsumed: null,
-          routeData: lat ? [{ lat, lng, ts: packetTime.toISOString(), spd: speed }] : [],
+          startLatitude: state.lastLat || pkt.lat, startLongitude: state.lastLng || pkt.lng,
+          avgSpeed: 0, maxSpeed: 0,
+          drivingTimeSeconds: 0, engineIdleSeconds: 0, idleTime: 0,
+          stoppageCount: 0, fuelConsumed: null,
+          odometerStart: pkt.odometer || null,
+          routeData: pkt.lat ? [{ lat: pkt.lat, lng: pkt.lng, ts: pkt.timestamp.toISOString(), spd: pkt.speed }] : [],
         });
         state.currentTripId = newTrip.id;
         justCreated = true;
@@ -407,113 +357,139 @@ async function processPacket(doc, deviceType) {
       if (!state.currentSessionId) {
         const newSession = await VehicleEngineSession.create({
           vehicleId, imei,
-          startTime: state.engineOnSince || packetTime,
-          startLatitude: lat, startLongitude: lng,
-          startFuelLevel: fuelLevel,
+          startTime: state.engineOnSince || pkt.timestamp,
+          startLatitude: pkt.lat, startLongitude: pkt.lng,
+          startFuelLevel: pkt.fuel,
+          odometerStart: pkt.odometer || null,
           tripId: state.currentTripId,
-          distanceKm: 0, status: 'active',
+          distanceKm: 0, drivingSeconds: 0, idleSeconds: 0, status: 'active',
         });
         state.currentSessionId = newSession.id;
         justCreated = true;
       }
 
-      // Distance for this segment (skip on first packet after recovery — no valid prev pos)
-      const prevLat = state.lastLat;
-      const prevLng = state.lastLng;
-      const segmentKm = (!justCreated && prevLat && lat) ? haversine(prevLat, prevLng, lat, lng) : 0;
+      // Segment distance
+      const prevLat   = state.lastLat;
+      const prevLng   = state.lastLng;
+      const segmentKm = (!justCreated && prevLat && pkt.lat)
+        ? haversine(prevLat, prevLng, pkt.lat, pkt.lng) : 0;
 
-      await VehicleEngineSession.increment({ distanceKm: segmentKm }, { where: { id: state.currentSessionId } });
+      // Determine if this segment was driving or idling
+      const isDriving = pkt.speed >= DRIVING_SPEED_THRESHOLD;
+      // Approximate segment duration from last GPS packet time
+      const segmentSecs = state.lastGpsPacketTime && pkt.lat
+        ? Math.max(0, Math.floor((now - new Date(state.lastGpsPacketTime).getTime()) / 1000))
+        : 0;
+
+      await VehicleEngineSession.increment(
+        {
+          distanceKm:     segmentKm,
+          drivingSeconds: isDriving ? segmentSecs : 0,
+          idleSeconds:    isDriving ? 0 : segmentSecs,
+        },
+        { where: { id: state.currentSessionId } }
+      );
 
       const trip = await Trip.findByPk(state.currentTripId);
       if (trip) {
         const durationSec = Math.floor((now - new Date(trip.startTime).getTime()) / 1000);
-        const newDist = parseFloat(trip.distance || 0) + segmentKm;
-        const newMax = Math.max(parseFloat(trip.maxSpeed || 0), speed);
+        const newDist     = parseFloat(trip.distance || 0) + segmentKm;
+        const newMax      = Math.max(parseFloat(trip.maxSpeed || 0), pkt.speed);
 
-        // Append route point (sample every ~30 s to limit storage)
+        // Append route point (sample every ~30 s)
         let route = trip.routeData || [];
         const lastPt = route[route.length - 1];
-        if ((!lastPt || (now - new Date(lastPt.ts).getTime()) / 1000 >= 30) && lat) {
-          route = [...route, { lat, lng, ts: packetTime.toISOString(), spd: speed }];
+        if (pkt.lat && (!lastPt || (now - new Date(lastPt.ts).getTime()) / 1000 >= 30)) {
+          route = [...route, { lat: pkt.lat, lng: pkt.lng, ts: pkt.timestamp.toISOString(), spd: pkt.speed }];
           if (route.length > 2000) route = route.slice(-2000);
         }
 
-        const movingPts = route.filter(p => p.spd > 0);
-        const avgSpeed = movingPts.length
-          ? movingPts.reduce((s, p) => s + p.spd, 0) / movingPts.length
-          : 0;
+        const movingPts = route.filter(p => p.spd >= DRIVING_SPEED_THRESHOLD);
+        const avgSpeed  = movingPts.length
+          ? movingPts.reduce((s, p) => s + p.spd, 0) / movingPts.length : 0;
 
         await trip.update({
-          endTime: packetTime,
-          duration: durationSec,
-          distance: newDist,
-          maxSpeed: newMax,
-          avgSpeed: Math.round(avgSpeed * 100) / 100,
-          endLatitude: lat || trip.endLatitude,
-          endLongitude: lng || trip.endLongitude,
-          routeData: route,
+          endTime:            pkt.timestamp,
+          duration:           durationSec,
+          distance:           newDist,
+          maxSpeed:           newMax,
+          avgSpeed:           Math.round(avgSpeed * 100) / 100,
+          endLatitude:        pkt.lat || trip.endLatitude,
+          endLongitude:       pkt.lng || trip.endLongitude,
+          routeData:          route,
+          odometerEnd:        pkt.odometer != null ? pkt.odometer : trip.odometerEnd,
+          drivingTimeSeconds: (trip.drivingTimeSeconds || 0) + (isDriving ? segmentSecs : 0),
+          engineIdleSeconds:  (trip.engineIdleSeconds  || 0) + (isDriving ? 0 : segmentSecs),
+          idleTime:           (trip.idleTime           || 0) + (isDriving ? 0 : segmentSecs),
+          fuelConsumed:       (pkt.fuel !== null && trip.odometerStart !== null)
+                                ? Math.max(0, (state.lastFuelLevel || pkt.fuel) - pkt.fuel)
+                                : trip.fuelConsumed,
         });
       }
     }
-    // else: !ignitionOn && !prevEngineOn — engine still off, nothing to do
 
-    // ── Persist device state ────────────────────────────────────────────────
+    // ── 8. Persist live device state ────────────────────────────────────────
     await state.save();
     await VehicleDeviceState.update(
       {
-        lastLat: lat || state.lastLat,
-        lastLng: lng || state.lastLng,
-        lastSpeed: speed,
-        lastFuelLevel: fuelLevel !== null ? fuelLevel : state.lastFuelLevel,
-        lastOdometer: odometer || state.lastOdometer,
-        lastPacketTime: packetTime,
-        // Only advance lastGpsPacketTime while the engine is ON.
-        // This means it tracks "last moment the vehicle was known to be running",
-        // NOT the last received packet.  A parking/wake-up packet sent just before
-        // an afternoon restart (ignitionOn=false) must NOT reset this value, or the
-        // gap-detection logic in ENGINE TURNED ON would see a tiny engineOffMs and
-        // incorrectly treat a 4-hour stop as a brief traffic-light pause.
-        lastGpsPacketTime: ignitionOn ? packetTime : state.lastGpsPacketTime,
-        engineOn: ignitionOn,
-        currentSessionId: state.currentSessionId,
-        currentTripId: state.currentTripId,
-        engineOnSince: state.engineOnSince,
-        engineOffSince: state.engineOffSince,
-        pendingTripEnd: state.pendingTripEnd,
+        lastLat:             pkt.lat  || state.lastLat,
+        lastLng:             pkt.lng  || state.lastLng,
+        lastAltitude:        pkt.altitude   != null ? pkt.altitude   : state.lastAltitude,
+        lastSatellites:      pkt.satellites != null ? pkt.satellites : state.lastSatellites,
+        lastCourse:          pkt.course     != null ? pkt.course     : state.lastCourse,
+        lastSpeed:           pkt.speed,
+        lastFuelLevel:       pkt.fuel       != null ? pkt.fuel       : state.lastFuelLevel,
+        lastOdometer:        state.lastOdometer,               // haversine-accumulated (unchanged here)
+        lastOdometerReading: pkt.odometer   != null ? pkt.odometer   : state.lastOdometerReading,
+        lastBattery:         pkt.battery    != null ? pkt.battery    : state.lastBattery,
+        lastExternalVoltage: pkt.externalVoltage != null ? pkt.externalVoltage : state.lastExternalVoltage,
+        lastGsmSignal:       pkt.gsmSignal  != null ? pkt.gsmSignal  : state.lastGsmSignal,
+        lastPacketTime:      pkt.timestamp,
+        lastGpsPacketTime:   (ignitionOn && pkt.hasGps) ? pkt.timestamp : state.lastGpsPacketTime,
+        engineOn:            ignitionOn,
+        currentSessionId:    state.currentSessionId,
+        currentTripId:       state.currentTripId,
+        engineOnSince:       state.engineOnSince,
+        engineOffSince:      state.engineOffSince,
+        pendingTripEnd:      state.pendingTripEnd,
       },
       { where: { vehicleId } }
     );
   } catch (err) {
     if (err.name === 'SequelizeForeignKeyConstraintError' && doc?.imei) {
       invalidateVehicleCache(doc.imei);
-      console.warn(`[PacketProcessor] FK violation for IMEI ${doc.imei} — stale cache cleared, will retry on next packet`);
+      console.warn(`[PacketProcessor] FK violation for IMEI ${doc.imei} — cache cleared`);
     } else {
       console.error('[PacketProcessor] Error processing packet:', err.message);
     }
   }
 }
 
-async function closeEngineSession(sessionId, endTime, lat, lng, fuelLevel, state) {
+// ─── Session close helper ─────────────────────────────────────────────────────
+async function closeEngineSession(sessionId, endTime, lat, lng, fuelLevel, odometer, state) {
   const session = await VehicleEngineSession.findByPk(sessionId);
   if (!session || session.status === 'completed') return;
+
   const durationSec = Math.max(0, Math.floor(
     (new Date(endTime).getTime() - new Date(session.startTime).getTime()) / 1000
   ));
   const fuelConsumed =
     session.startFuelLevel !== null && fuelLevel !== null
-      ? Math.max(0, session.startFuelLevel - fuelLevel)
-      : 0;
+      ? Math.max(0, session.startFuelLevel - fuelLevel) : 0;
+
   await session.update({
     endTime,
     durationSeconds: durationSec,
-    endLatitude: lat || null,
-    endLongitude: lng || null,
-    endFuelLevel: fuelLevel,
+    endLatitude:     lat  || null,
+    endLongitude:    lng  || null,
+    endFuelLevel:    fuelLevel,
+    odometerEnd:     odometer != null ? odometer : session.odometerEnd,
     fuelConsumed,
     status: 'completed',
   });
 }
 
+// ─── Trip close helper ────────────────────────────────────────────────────────
 async function closeTripIfActive(tripId, endTime) {
   const trip = await Trip.findByPk(tripId);
   if (!trip) return;
@@ -523,133 +499,124 @@ async function closeTripIfActive(tripId, endTime) {
   await trip.update({ endTime, duration: durationSec });
 }
 
+// ─── Batch reprocess ──────────────────────────────────────────────────────────
 /**
- * Batch reprocess historical packets from MongoDB for a vehicle.
- * Used for backfilling existing data.
+ * Reprocess all historical packets from MongoDB for a vehicle in a date range.
+ * Deletes existing trips/sessions/stops for the range and rebuilds from scratch.
+ *
+ * Works with any device type because processPacket() uses the normalizer.
  */
 async function reprocessVehicle(vehicleId, from, to) {
-  const { getMongoDb } = require('../config/mongodb');
+  const { getMongoDb }  = require('../config/mongodb');
+  const { DeviceConfig } = require('../models');
+
   const vehicle = await Vehicle.findByPk(vehicleId);
   if (!vehicle || !vehicle.imei) return { processed: 0 };
 
-  // Block live change-stream packets for this vehicle while reprocessing.
-  // Without this lock the live stream can process a current-time packet
-  // mid-run and create trips/sessions in DB state that the reprocess will
-  // then overwrite with historical timestamps, producing negative durations.
   reprocessingVehicles.add(vehicleId);
 
   try {
-  // Clear stale cache so processPacket finds the active vehicle, not a soft-deleted one with the same IMEI
-  invalidateVehicleCache(vehicle.imei);
+    invalidateVehicleCache(vehicle.imei);
 
-  const db = getMongoDb();
-  const fromDate = new Date(from);
-  const toDate = new Date(to);
+    const db       = getMongoDb();
+    const fromDate = new Date(from);
+    const toDate   = new Date(to);
 
-  // Determine which collections to check
-  const collections = [];
-  const dtype = (vehicle.deviceType || '').toUpperCase();
-  if (dtype.startsWith('FMB')) {
-    collections.push(`${dtype.toLowerCase()}locations`);
-  } else if (dtype === 'GT06') {
-    collections.push('gt06locations');
-  } else {
-    collections.push('fmb125locations', 'gt06locations');
-  }
+    // Determine collections to query.
+    // Prefer DeviceConfig.mongoCollection for accuracy; fall back to convention.
+    const dtype = (vehicle.deviceType || '').toUpperCase();
+    let collections = [];
 
-  let processed = 0;
-  const imeis = [vehicle.imei];
-  if (vehicle.imei.startsWith('0')) imeis.push(vehicle.imei.slice(1));
-  else imeis.push('0' + vehicle.imei);
-
-  // Capture prior engine state before wiping so the state machine can resume
-  // in the correct context (e.g. engine was ON from a trip that started before
-  // the reprocess range and continues into it).
-  const priorState = await VehicleDeviceState.findOne({ where: { vehicleId } });
-  const priorContext =
-    priorState &&
-    priorState.lastPacketTime &&
-    new Date(priorState.lastPacketTime) < fromDate
-      ? {
-          engineOn: priorState.engineOn,
-          engineOnSince: priorState.engineOn ? priorState.engineOnSince : null,
-          lastLat: priorState.lastLat,
-          lastLng: priorState.lastLng,
-          lastFuelLevel: priorState.lastFuelLevel,
-          lastOdometer: priorState.lastOdometer,
-        }
+    const cfg = dtype
+      ? await DeviceConfig.findOne({ where: { type: dtype } })
       : null;
 
-  // Reset device state for clean reprocessing
-  await VehicleDeviceState.destroy({ where: { vehicleId } });
+    if (cfg?.mongoCollection) {
+      collections = [{ colName: cfg.mongoCollection, deviceType: dtype }];
+    } else if (dtype.startsWith('FMB')) {
+      collections = [{ colName: `${dtype.toLowerCase()}locations`, deviceType: dtype }];
+    } else if (dtype === 'GT06') {
+      collections = [{ colName: 'gt06locations', deviceType: 'GT06' }];
+    } else {
+      // Unknown — try both legacy collections
+      collections = [
+        { colName: 'fmb125locations', deviceType: 'FMB125' },
+        { colName: 'gt06locations',   deviceType: 'GT06'   },
+      ];
+    }
 
-  // Remove existing data in range — also catch records that SPAN the range
-  // boundary (started before fromDate but extend into or past toDate).
-  const spanOrInRange = (timeCol) => ({
-    vehicleId,
-    [Op.or]: [
-      { [timeCol]: { [Op.between]: [fromDate, toDate] } },
-      { [timeCol]: { [Op.lt]: fromDate }, endTime: { [Op.gt]: fromDate } },
-      { [timeCol]: { [Op.lt]: fromDate }, endTime: null },
-    ],
-  });
-  await VehicleEngineSession.destroy({ where: spanOrInRange('startTime') });
-  await VehicleFuelEvent.destroy({ where: { vehicleId, eventTime: { [Op.between]: [fromDate, toDate] } } });
-  await Trip.destroy({ where: spanOrInRange('startTime') });
-  await Stop.destroy({ where: spanOrInRange('startTime') });
+    // Capture prior engine state before wiping
+    const priorState = await VehicleDeviceState.findOne({ where: { vehicleId } });
+    const priorContext =
+      priorState?.lastPacketTime && new Date(priorState.lastPacketTime) < fromDate
+        ? {
+            engineOn:     priorState.engineOn,
+            engineOnSince: priorState.engineOn ? priorState.engineOnSince : null,
+            lastLat:      priorState.lastLat,
+            lastLng:      priorState.lastLng,
+            lastFuelLevel: priorState.lastFuelLevel,
+            lastOdometerReading: priorState.lastOdometerReading,
+          }
+        : null;
 
-  // Restore prior engine context so the state machine begins in the correct
-  // state.  All time anchors are clamped to fromDate so that:
-  //
-  //   1. engineOnSince = fromDate  → the recovery session/trip created by the
-  //      first STILL-ON packet will have startTime = fromDate (within the
-  //      report range), not yesterday's timestamp which would make it invisible
-  //      to date-range queries.
-  //
-  //   2. lastGpsPacketTime = fromDate  → gap detection has a valid baseline for
-  //      the very first incoming packet.  If the first packet arrives < 30 min
-  //      after midnight the gap is small → no split; session starts at fromDate.
-  //      If the first packet is ≥ 30 min after midnight the gap fires → engine-
-  //      OnSince resets to the first real packet time → session starts at first
-  //      real data point.  Either way the session falls inside today's range.
-  if (priorContext) {
-    await VehicleDeviceState.create({
+    // Reset device state
+    await VehicleDeviceState.destroy({ where: { vehicleId } });
+
+    // Remove existing records in range
+    const spanOrInRange = (timeCol) => ({
       vehicleId,
-      imei: vehicle.imei,
-      engineOn: priorContext.engineOn,
-      engineOnSince: priorContext.engineOn ? fromDate : null,  // clamped to range start
-      lastLat: priorContext.lastLat,
-      lastLng: priorContext.lastLng,
-      lastFuelLevel: priorContext.lastFuelLevel,
-      lastOdometer: priorContext.lastOdometer,
-      lastPacketTime: fromDate,       // anchored to range start
-      lastGpsPacketTime: priorContext.engineOn ? fromDate : null, // gap-detection baseline
-      currentTripId: null,            // re-created by STILL ON recovery block on first packet
-      currentSessionId: null,
-      pendingTripEnd: false,
-      engineOffSince: null,
+      [Op.or]: [
+        { [timeCol]: { [Op.between]: [fromDate, toDate] } },
+        { [timeCol]: { [Op.lt]: fromDate }, endTime: { [Op.gt]: fromDate } },
+        { [timeCol]: { [Op.lt]: fromDate }, endTime: null },
+      ],
     });
-  }
+    await VehicleEngineSession.destroy({ where: spanOrInRange('startTime') });
+    await VehicleFuelEvent.destroy({ where: { vehicleId, eventTime: { [Op.between]: [fromDate, toDate] } } });
+    await Trip.destroy({ where: spanOrInRange('startTime') });
+    await Stop.destroy({ where: spanOrInRange('startTime') });
 
-  for (const colName of collections) {
-    try {
+    // Re-create device state, injecting prior context if available
+    if (priorContext) {
+      await VehicleDeviceState.create({
+        vehicleId,
+        imei: vehicle.imei,
+        engineOn:     priorContext.engineOn,
+        engineOnSince: priorContext.engineOnSince,
+        lastLat:      priorContext.lastLat,
+        lastLng:      priorContext.lastLng,
+        lastFuelLevel: priorContext.lastFuelLevel,
+        lastOdometerReading: priorContext.lastOdometerReading,
+        lastGpsPacketTime: priorContext.engineOn ? priorContext.engineOnSince : null,
+      });
+    }
+
+    // Replay packets in chronological order
+    const imeis = [vehicle.imei];
+    if (vehicle.imei.startsWith('0')) imeis.push(vehicle.imei.slice(1));
+    else imeis.push('0' + vehicle.imei);
+
+    let processed = 0;
+    for (const { colName, deviceType } of collections) {
       const col = db.collection(colName);
       const cursor = col
         .find({ imei: { $in: imeis }, timestamp: { $gte: fromDate, $lte: toDate } })
         .sort({ timestamp: 1 });
 
-      for await (const doc of cursor) {
-        const dt = colName.includes('fmb') ? 'FMB125' : 'GT06';
-        await processPacket(doc, dt);
+      for await (const rawDoc of cursor) {
+        await processPacket(rawDoc, deviceType);
         processed++;
       }
-    } catch (_) { /* collection may not exist */ }
-  }
+    }
 
-  return { processed };
+    return { processed };
   } finally {
     reprocessingVehicles.delete(vehicleId);
   }
 }
 
-module.exports = { processPacket, reprocessVehicle, invalidateVehicleCache };
+module.exports = {
+  processPacket,
+  reprocessVehicle,
+  invalidateVehicleCache,
+};

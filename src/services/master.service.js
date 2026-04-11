@@ -1,4 +1,5 @@
 const { DeviceConfig, StateDefinition } = require('../models');
+const { getCapabilities }               = require('../config/deviceCapabilities');
 
 // ─── Default state definitions ────────────────────────────────────────────────
 
@@ -154,6 +155,115 @@ const FMB125_DEFAULTS = [
 
 // ─── Seed built-in device configs on server startup ───────────────────────────
 
+// ─── Shared state definitions for Teltonika devices (FMB125, FMB920) ──────────
+// Same state logic; only the ignitionSource differs (handled in packetProcessor).
+const TELTONIKA_DEFAULTS = [
+  {
+    stateName: 'No Signal',
+    stateColor: '#64748B', stateIcon: '📵', priority: 1, conditionLogic: 'AND',
+    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
+    isDefault: false,
+  },
+  {
+    stateName: 'No GPS',
+    stateColor: '#F59E0B', stateIcon: '📡', priority: 2, conditionLogic: 'AND',
+    conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
+    isDefault: false,
+  },
+  {
+    stateName: 'Overspeed',
+    stateColor: '#DC2626', stateIcon: '🏎️', priority: 3, conditionLogic: 'AND',
+    conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
+    isDefault: false,
+  },
+  {
+    stateName: 'Running',
+    stateColor: '#16A34A', stateIcon: '🟢', priority: 4, conditionLogic: 'AND',
+    conditions: [
+      { field: 'ignition', operator: 'eq', value: true },
+      { field: 'speed',    operator: 'gte', value: 1 },
+    ],
+    isDefault: false,
+  },
+  {
+    stateName: 'Idle',
+    stateColor: '#D97706', stateIcon: '⏸️', priority: 5, conditionLogic: 'AND',
+    conditions: [
+      { field: 'ignition', operator: 'eq', value: true },
+      { field: 'speed',    operator: 'lt',  value: 1 },
+    ],
+    isDefault: false,
+  },
+  {
+    stateName: 'Stopped',
+    stateColor: '#EF4444', stateIcon: '🔴', priority: 6, conditionLogic: 'AND',
+    conditions: [{ field: 'ignition', operator: 'eq', value: false }],
+    isDefault: false,
+  },
+  {
+    stateName: 'Unknown',
+    stateColor: '#94A3B8', stateIcon: '❓', priority: 99, conditionLogic: 'AND',
+    conditions: [], isDefault: true,
+  },
+];
+
+// ─── AIS-140 state definitions ─────────────────────────────────────────────────
+const AIS140_DEFAULTS = [
+  {
+    stateName: 'No Signal',
+    stateColor: '#64748B', stateIcon: '📵', priority: 1, conditionLogic: 'AND',
+    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
+    isDefault: false,
+  },
+  {
+    stateName: 'No GPS',
+    stateColor: '#F59E0B', stateIcon: '📡', priority: 2, conditionLogic: 'AND',
+    conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
+    isDefault: false,
+  },
+  {
+    stateName: 'Emergency',
+    stateColor: '#7C3AED', stateIcon: '🆘', priority: 3, conditionLogic: 'AND',
+    conditions: [{ field: 'emergency', operator: 'eq', value: true }],
+    isDefault: false,
+  },
+  {
+    stateName: 'Overspeed',
+    stateColor: '#DC2626', stateIcon: '🏎️', priority: 4, conditionLogic: 'AND',
+    conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
+    isDefault: false,
+  },
+  {
+    stateName: 'Running',
+    stateColor: '#16A34A', stateIcon: '🟢', priority: 5, conditionLogic: 'AND',
+    conditions: [
+      { field: 'ignition', operator: 'eq',  value: true },
+      { field: 'speed',    operator: 'gte', value: 5 },
+    ],
+    isDefault: false,
+  },
+  {
+    stateName: 'Idle',
+    stateColor: '#D97706', stateIcon: '⏸️', priority: 6, conditionLogic: 'AND',
+    conditions: [
+      { field: 'ignition', operator: 'eq', value: true },
+      { field: 'speed',    operator: 'lt', value: 5 },
+    ],
+    isDefault: false,
+  },
+  {
+    stateName: 'Stopped',
+    stateColor: '#EF4444', stateIcon: '🔴', priority: 7, conditionLogic: 'AND',
+    conditions: [{ field: 'ignition', operator: 'eq', value: false }],
+    isDefault: false,
+  },
+  {
+    stateName: 'Unknown',
+    stateColor: '#94A3B8', stateIcon: '❓', priority: 99, conditionLogic: 'AND',
+    conditions: [], isDefault: true,
+  },
+];
+
 const BUILT_INS = [
   {
     name: 'GT06 GPS Tracker',
@@ -171,17 +281,64 @@ const BUILT_INS = [
     serverPort: 5027,
     mongoCollection: 'fmb125locations',
     isBuiltIn: true,
-    defaults: FMB125_DEFAULTS,
+    defaults: TELTONIKA_DEFAULTS,
+  },
+  {
+    name: 'Teltonika FMB920',
+    type: 'FMB920',
+    serverIp: null,
+    serverPort: 5028,
+    mongoCollection: 'fmb920locations',
+    isBuiltIn: true,
+    defaults: TELTONIKA_DEFAULTS,
+  },
+  {
+    name: 'AIS-140 VLTD (India)',
+    type: 'AIS140',
+    serverIp: null,
+    serverPort: 5029,
+    mongoCollection: 'ais140locations',
+    isBuiltIn: true,
+    defaults: AIS140_DEFAULTS,
   },
 ];
 
 const seedBuiltIns = async () => {
   for (const spec of BUILT_INS) {
     const { defaults, ...configData } = spec;
-    const [config] = await DeviceConfig.findOrCreate({
+
+    // Attach capability snapshot so the frontend/API can read it without importing server config
+    const caps = getCapabilities(spec.type);
+    configData.capabilities = {
+      ignitionSource:       caps.ignitionSource,
+      supportsGps:          caps.supportsGps,
+      supportsAltitude:     caps.supportsAltitude,
+      supportsSatellites:   caps.supportsSatellites,
+      supportsBattery:      caps.supportsBattery,
+      supportsExternalVoltage: caps.supportsExternalVoltage,
+      supportsOdometer:     caps.supportsOdometer,
+      supportsFuel:         caps.supportsFuel,
+      supportsRpm:          caps.supportsRpm,
+      supportsTemperature:  caps.supportsTemperature,
+      supportsGsmSignal:    caps.supportsGsmSignal,
+      supportsDigitalInputs: caps.supportsDigitalInputs,
+      supportsAnalogInputs: caps.supportsAnalogInputs,
+      supportsCustomIo:     caps.supportsCustomIo,
+    };
+
+    const [config, created] = await DeviceConfig.findOrCreate({
       where: { type: spec.type },
       defaults: configData,
     });
+
+    // Keep capabilities in sync even if record already existed
+    if (!created) {
+      await config.update({
+        capabilities:    configData.capabilities,
+        mongoCollection: configData.mongoCollection,
+        serverPort:      config.serverPort || configData.serverPort,
+      });
+    }
 
     // Always replace built-in states so updated defaults are applied on every server start.
     await StateDefinition.destroy({ where: { deviceConfigId: config.id } });

@@ -89,7 +89,7 @@ sequelize
     return connectMongoDB()
       .then(() => {
         console.log('✓ MongoDB connected - GPS tracking enabled');
-        startChangeStreams();
+        return startChangeStreams(); // async — returns promise; drives collection list from DeviceConfig
       })
       .catch((err) => {
         console.error('✖ MongoDB connection failed:', err.message);
@@ -111,16 +111,38 @@ sequelize
 /**
  * Watch MongoDB collections for new packets and run them through the
  * PacketProcessor state machine in real time.
- * Retries with backoff on error (e.g. replica set not available).
+ *
+ * Collections are driven from DeviceConfig (MySQL) so that adding a new device
+ * type via master.service.js automatically starts a change stream on next
+ * server restart — no code change needed in app.js.
+ *
+ * Retries with exponential backoff on error (e.g. replica-set not available).
  */
-function startChangeStreams() {
-  const collections = [
-    { name: 'fmb125locations', deviceType: 'FMB125' },
-    { name: 'gt06locations',   deviceType: 'GT06' },
-  ];
+async function startChangeStreams() {
+  let configs = [];
+  try {
+    const { DeviceConfig } = require('./src/models');
+    configs = await DeviceConfig.findAll({ where: { isActive: true } });
+  } catch (err) {
+    console.warn('[ChangeStream] Could not read DeviceConfig from MySQL — falling back to defaults:', err.message);
+  }
 
-  for (const { name, deviceType } of collections) {
-    watchCollection(name, deviceType);
+  // Fallback if DB read failed or table is empty
+  if (!configs.length) {
+    configs = [
+      { mongoCollection: 'fmb125locations', type: 'FMB125' },
+      { mongoCollection: 'gt06locations',   type: 'GT06'   },
+    ];
+  }
+
+  // Deduplicate by mongoCollection (multiple device types may share a collection only if intentional)
+  const seen = new Set();
+  for (const cfg of configs) {
+    const col        = cfg.mongoCollection || cfg.mongoCollection;
+    const deviceType = cfg.type || cfg.deviceType;
+    if (!col || !deviceType || seen.has(col)) continue;
+    seen.add(col);
+    watchCollection(col, deviceType);
   }
 }
 
