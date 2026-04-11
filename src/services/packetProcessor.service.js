@@ -248,13 +248,7 @@ async function processPacket(doc, deviceType) {
           state.pendingTripEnd = false;
           state.engineOffSince = null;
         } else {
-          // Long stop — close lingering trip
-          const tripEndTime =
-            state.lastGpsPacketTime && state.engineOffSince &&
-            new Date(state.lastGpsPacketTime) < new Date(state.engineOffSince)
-              ? new Date(state.lastGpsPacketTime)
-              : state.engineOffSince || pkt.timestamp;
-          await closeTripIfActive(state.currentTripId, tripEndTime);
+          // Long stop — trip was already closed on ENGINE OFF; just clear the reference
           state.currentTripId  = null;
           state.pendingTripEnd = false;
           state.engineOffSince = null;
@@ -296,6 +290,11 @@ async function processPacket(doc, deviceType) {
       if (state.currentSessionId) {
         await closeEngineSession(state.currentSessionId, pkt.timestamp, pkt.lat, pkt.lng, pkt.fuel, pkt.odometer, state);
       }
+      // Close trip immediately — it is visible in reports right away.
+      // currentTripId is preserved so a brief stop (< idleThreshold) can resume it.
+      if (state.currentTripId) {
+        await closeTripIfActive(state.currentTripId, pkt.timestamp);
+      }
       state.engineOn         = false;
       state.currentSessionId = null;
       state.engineOffSince   = pkt.timestamp;
@@ -311,7 +310,7 @@ async function processPacket(doc, deviceType) {
         : (caps.ignitionSource === 'acc-hysteresis' ? 0 : idleThresholdMs);
 
       if (offMs >= offThresholdMs && state.currentTripId) {
-        await closeTripIfActive(state.currentTripId, state.engineOffSince || pkt.timestamp);
+        // Trip was already closed on ENGINE OFF — just release the resume reference
         state.currentTripId  = null;
         state.pendingTripEnd = false;
       }
@@ -466,7 +465,7 @@ async function processPacket(doc, deviceType) {
 }
 
 // ─── Session close helper ─────────────────────────────────────────────────────
-async function closeEngineSession(sessionId, endTime, lat, lng, fuelLevel, odometer, state) {
+async function closeEngineSession(sessionId, endTime, lat, lng, fuelLevel, odometer, _state) {
   const session = await VehicleEngineSession.findByPk(sessionId);
   if (!session || session.status === 'completed') return;
 

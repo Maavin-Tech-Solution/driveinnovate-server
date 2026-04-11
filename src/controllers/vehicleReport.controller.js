@@ -311,3 +311,63 @@ exports.reprocess = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ─── Background reprocess job queue (in-memory, keyed by vehicleId+range) ──────
+// Jobs survive for 2 hours then are cleared.
+const bgJobs = new Map(); // key: `${vehicleId}|${from}|${to}` → { status, startedAt, finishedAt, processed, error }
+const JOB_TTL_MS = 2 * 60 * 60 * 1000;
+
+function jobKey(vehicleId, from, to) {
+  // Round "to" to the nearest minute so repeated calls for "now" reuse the same key
+  const roundedTo = new Date(Math.floor(new Date(to).getTime() / 60000) * 60000).toISOString();
+  return `${vehicleId}|${new Date(from).toISOString()}|${roundedTo}`;
+}
+
+exports.reprocessBg = (req, res) => {
+  try {
+    if (!req.body.from || !req.body.to) {
+      return res.status(400).json({ success: false, message: '`from` and `to` dates are required' });
+    }
+    const { from, to } = parseBodyRange(req.body);
+    const key = jobKey(req.params.id, from, to);
+
+    const existing = bgJobs.get(key);
+    if (existing && existing.status === 'running') {
+      return res.json({ success: true, data: { status: 'running', startedAt: existing.startedAt } });
+    }
+
+    // Stale or no job — start fresh
+    const job = { status: 'running', startedAt: new Date().toISOString(), finishedAt: null, processed: 0, error: null };
+    bgJobs.set(key, job);
+
+    // Fire-and-forget — no await
+    reprocessVehicle(req.params.id, from, to)
+      .then(result => {
+        job.status    = 'done';
+        job.processed = result.processed;
+        job.finishedAt = new Date().toISOString();
+        setTimeout(() => bgJobs.delete(key), JOB_TTL_MS);
+      })
+      .catch(err => {
+        job.status = 'error';
+        job.error  = err.message;
+        job.finishedAt = new Date().toISOString();
+      });
+
+    res.json({ success: true, data: { status: 'running', startedAt: job.startedAt } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.reprocessStatus = (req, res) => {
+  try {
+    const { from, to } = parseRange(req.query);
+    const key = jobKey(req.params.id, from, to);
+    const job = bgJobs.get(key);
+    if (!job) return res.json({ success: true, data: { status: 'idle' } });
+    res.json({ success: true, data: job });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
