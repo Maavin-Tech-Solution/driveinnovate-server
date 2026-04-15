@@ -203,11 +203,13 @@ exports.getRawPackets = async (req, res) => {
     else imeis.push('0' + vehicle.imei);
 
     const dtype = (vehicle.deviceType || '').toUpperCase();
-    const collections = dtype.startsWith('FMB')
-      ? [`${dtype.toLowerCase()}locations`]
-      : dtype === 'GT06'
-        ? ['gt06locations']
-        : ['gt06locations', 'fmb125locations'];
+    const collections = dtype === 'AIS140'
+      ? ['ais140locations']
+      : dtype.startsWith('FMB')
+        ? [`${dtype.toLowerCase()}locations`]
+        : dtype === 'GT06'
+          ? ['gt06locations']
+          : ['gt06locations', 'fmb125locations', 'ais140locations'];
 
     const db = getMongoDb();
     const docs = [];

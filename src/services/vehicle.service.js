@@ -1,18 +1,20 @@
 const { Vehicle, RtoDetail, User, VehicleDeviceState } = require('../models');
 const { Op } = require('sequelize');
-const { Location, FMB125Location, isMongoDBConnected } = require('../config/mongodb');
+const { Location, FMB125Location, AIS140Location, isMongoDBConnected } = require('../config/mongodb');
 const { invalidateVehicleCache } = require('./packetProcessor.service');
 
-// FMB125 device types that should use fmb125locations collection
+// Device type groups → MongoDB collections
 const FMB125_DEVICE_TYPES = ['FMB125', 'FMB120', 'FMB130', 'FMB140', 'FMB920'];
+const AIS140_DEVICE_TYPES = ['AIS140'];
 
 /**
  * Get the correct MongoDB Location model based on vehicle device type
  */
 const getLocationModel = (deviceType) => {
-  if (deviceType && FMB125_DEVICE_TYPES.includes(deviceType.toUpperCase())) {
-    return FMB125Location;
-  }
+  if (!deviceType) return Location;
+  const dt = deviceType.toUpperCase();
+  if (AIS140_DEVICE_TYPES.includes(dt)) return AIS140Location;
+  if (FMB125_DEVICE_TYPES.includes(dt))  return FMB125Location;
   return Location;
 };
 
@@ -94,18 +96,26 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
     return null;
   }
   
-  const isFMB125 = deviceType && FMB125_DEVICE_TYPES.includes(deviceType.toUpperCase());
+  const dt = (deviceType || '').toUpperCase();
+  const isFMB125  = FMB125_DEVICE_TYPES.includes(dt);
+  const isAIS140  = AIS140_DEVICE_TYPES.includes(dt);
   const LocationModel = getLocationModel(deviceType);
-  
+
+  const deviceLabel = isAIS140 ? 'AIS140' : isFMB125 ? 'FMB125' : 'GT06';
+
   try {
-    console.log(`[DEVICE] Fetching comprehensive status for IMEI: ${imei} (${isFMB125 ? 'FMB125' : 'GT06'})`);
-    
-    // Normalize IMEI - try both with and without leading zero
+    console.log(`[DEVICE] Fetching comprehensive status for IMEI: ${imei} (${deviceLabel})`);
+
+    // Normalize IMEI — try with and without leading zero
     const imeiVariations = [
       imei,
       imei.startsWith('0') ? imei.substring(1) : `0${imei}`
     ];
-    
+
+    if (isAIS140) {
+      return await fetchAIS140Status(LocationModel, imeiVariations);
+    }
+
     if (isFMB125) {
       return await fetchFMB125Status(LocationModel, imeiVariations);
     }
@@ -130,7 +140,9 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
       // LOCATION_EXT (0x22) - Extended location with defense, charge status
       Location.findOne({
         imei: { $in: imeiVariations },
-        packetType: 'LOCATION_EXT'
+        packetType: 'LOCATION_EXT',
+        latitude:  { $exists: true, $gt: 0 },
+        longitude: { $exists: true, $ne: null },
       })
         .sort({ timestamp: -1 })
         .select('timestamp latitude longitude speed satellites acc defense charge gsmSignal')
@@ -255,6 +267,7 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
     // recognised packetType (e.g. after a firmware change or TCP server update).
     const gpsSource = [locationExtData, locationData, latestGps]
       .filter(Boolean)
+      .filter(d => d.latitude != null && d.latitude > 0 && d.longitude != null)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
 
     if (gpsSource) {
@@ -359,14 +372,17 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
           // Only update ignition from absoluteLatest for FMB125 (GT06 uses speed-based logic above)
           if (isFMB125 && absoluteLatest.acc !== undefined) aggregatedData.status.ignition = absoluteLatest.acc;
         }
-      } else {
-        // No GPS packet at all — still surface last contact time
+      } else if (absoluteLatest.latitude > 0 && absoluteLatest.longitude != null) {
+        // No GPS packet at all — surface last contact time only if coordinates are valid
         aggregatedData.gpsData = {
-          latitude: absoluteLatest.latitude || null,
-          longitude: absoluteLatest.longitude || null,
+          latitude: absoluteLatest.latitude,
+          longitude: absoluteLatest.longitude,
           speed: absoluteLatest.speed || 0,
           timestamp: absoluteLatest.timestamp,
         };
+      } else {
+        // Absolute latest has no valid coords — at least surface the contact timestamp
+        aggregatedData.gpsData = { timestamp: absoluteLatest.timestamp };
       }
     }
     
@@ -377,6 +393,132 @@ const fetchComprehensiveDeviceStatus = async (imei, deviceType) => {
   } catch (error) {
     console.error('[DEVICE] Error fetching comprehensive device status:', error.message);
     console.error('[DEVICE] Stack:', error.stack);
+    return null;
+  }
+};
+
+/**
+ * Fetch comprehensive status for AIS-140 / VLTD devices.
+ * All AIS-140 packet types (NMR, LGN, HBT, EMG) carry the full field set,
+ * so we query the latest GPS record and the absolute latest record in parallel.
+ */
+const fetchAIS140Status = async (LocationModel, imeiVariations) => {
+  try {
+    const [latestRecord, absoluteLatest, latestEmergency] = await Promise.all([
+      // Latest record that has a valid GPS fix
+      LocationModel.findOne({
+        imei:      { $in: imeiVariations },
+        latitude:  { $exists: true, $ne: null },
+        longitude: { $exists: true, $ne: null },
+        gpsValid:  { $ne: false },
+      }).sort({ timestamp: -1 }).lean(),
+
+      // Absolute latest packet — ensures lastUpdate = real last contact time
+      LocationModel.findOne({ imei: { $in: imeiVariations } })
+        .sort({ timestamp: -1 })
+        .select('timestamp ignition emergencyStatus gsmSignal')
+        .lean(),
+
+      // Latest emergency packet (packetType EMG) — for persistent alert display
+      LocationModel.findOne({
+        imei:       { $in: imeiVariations },
+        packetType: 'EMG',
+      }).sort({ timestamp: -1 }).select('timestamp emergencyStatus alertType').lean(),
+    ]);
+
+    if (!latestRecord && !absoluteLatest) {
+      console.log('[DEVICE/AIS140] ✗ No records found');
+      return null;
+    }
+
+    const src = latestRecord || {};
+
+    // ignition is stored as 0/1 integer
+    const ignition = absoluteLatest?.ignition != null
+      ? Boolean(absoluteLatest.ignition)
+      : (src.ignition != null ? Boolean(src.ignition) : null);
+
+    const emergency = latestEmergency?.emergencyStatus
+      ? true
+      : (absoluteLatest?.emergencyStatus ? true : false);
+
+    const aggregatedData = {
+      deviceType: 'AIS140',
+
+      gpsData: latestRecord ? {
+        latitude:   latestRecord.latitude,
+        longitude:  latestRecord.longitude,
+        speed:      latestRecord.speed    ?? 0,
+        satellites: latestRecord.satellites ?? 0,
+        course:     latestRecord.heading  ?? null,   // AIS140 uses 'heading'
+        altitude:   latestRecord.altitude ?? null,
+        gpsFixed:   latestRecord.gpsValid !== false,
+        timestamp:  latestRecord.timestamp,
+      } : null,
+
+      status: {
+        ignition,
+        movement:  src.speed != null ? src.speed > 0 : null,
+        battery:   src.batteryVoltage   != null ? parseFloat(src.batteryVoltage)   : null,  // V
+        voltage:   src.mainPowerVoltage != null ? parseFloat(src.mainPowerVoltage) : null,  // V
+        gsmSignal: src.gsmSignal        != null ? src.gsmSignal : (absoluteLatest?.gsmSignal ?? null),
+        emergency,
+        tamper:    src.tamperAlert     ? true : false,
+        di1: src.di1 ?? null,
+        di2: src.di2 ?? null,
+        di3: src.di3 ?? null,
+        di4: src.di4 ?? null,
+        // GT06-specific flags — not applicable for AIS140
+        charging:    null,
+        defense:     null,
+        oil:         null,
+        electric:    null,
+        door:        null,
+        gpsTracking: latestRecord?.gpsValid ?? null,
+      },
+
+      fuel:   null,   // AIS140 has no fuel sensor
+      engine: null,
+
+      trip: {
+        odometer: src.odometer != null ? parseFloat(src.odometer) : null,  // km
+      },
+
+      alerts: {
+        latestAlarm:    latestEmergency ? (latestEmergency.alertType || 'Emergency') : null,
+        alarmTimestamp: latestEmergency?.timestamp ?? null,
+      },
+
+      driver: null,
+
+      // Cell tower info (AIS140 specific)
+      cellInfo: {
+        mcc:      src.mcc      ?? null,
+        mnc:      src.mnc      ?? null,
+        lac:      src.lac      ?? null,
+        cellId:   src.cellId   ?? null,
+        operator: src.operatorName ?? null,
+      },
+
+      lastUpdate: absoluteLatest?.timestamp ?? latestRecord?.timestamp ?? null,
+    };
+
+    // Advance lastUpdate to absolute latest if newer
+    if (absoluteLatest?.timestamp && aggregatedData.lastUpdate) {
+      const absMs = new Date(absoluteLatest.timestamp).getTime();
+      const curMs = new Date(aggregatedData.lastUpdate).getTime();
+      if (absMs > curMs) aggregatedData.lastUpdate = absoluteLatest.timestamp;
+    }
+
+    console.log(
+      `[DEVICE/AIS140] Status: IGN=${aggregatedData.status.ignition}` +
+      ` SPEED=${src.speed} EMERGENCY=${emergency}` +
+      ` BAT=${aggregatedData.status.battery}V V=${aggregatedData.status.voltage}V`
+    );
+
+    return aggregatedData;
+  } catch (error) {
+    console.error('[DEVICE/AIS140] Error:', error.message);
     return null;
   }
 };
@@ -516,8 +658,6 @@ const attachGpsData = async (vehicle) => {
  * Helper function to attach comprehensive device status to a vehicle object
  * Used for sync operations to return complete vehicle status
  */
-const FMB125_TYPES = ['FMB125', 'FMB120', 'FMB130', 'FMB140', 'FMB920'];
-
 const attachComprehensiveStatus = async (vehicle) => {
   const vehicleJson = vehicle.toJSON();
 
@@ -526,17 +666,61 @@ const attachComprehensiveStatus = async (vehicle) => {
     fetchComprehensiveDeviceStatus(vehicleJson.imei, vehicleJson.deviceType),
     VehicleDeviceState.findOne({
       where: { vehicleId: vehicleJson.id },
-      attributes: ['engineOn', 'lastPacketTime'],
+      attributes: ['engineOn', 'lastPacketTime', 'lastLat', 'lastLng', 'lastSpeed', 'lastAltitude', 'lastSatellites', 'lastCourse'],
     }),
   ]);
 
   // VehicleDeviceState is the authoritative real-time source maintained by processPacket.
-  // Overrides apply to ALL device types (GT06 + FMB125):
+  // Overrides apply to ALL device types:
   //   • ignition    — processPacket applies correct hysteresis / hardware signal per device type
-  //   • lastUpdate  — reflects actual last-packet time, not just last GPS packet (FMB125 GPS-only query is narrower)
-  if (deviceStatus && state) {
-    if (state.engineOn != null) deviceStatus.status.ignition = state.engineOn;
-    if (state.lastPacketTime) deviceStatus.lastUpdate = state.lastPacketTime;
+  //   • lastUpdate  — reflects actual last-packet time, not just last GPS packet
+  //   • gpsData     — fallback when MongoDB returned no coords (e.g. vehicle.deviceType is null/wrong
+  //                   so fetchComprehensiveDeviceStatus queried the wrong collection, or no GPS-valid
+  //                   packets exist yet in MongoDB for this IMEI)
+  if (state) {
+    const stateHasGps = state.lastLat && state.lastLng;
+
+    if (!deviceStatus) {
+      // MongoDB returned nothing — synthesise minimal deviceStatus from VehicleDeviceState
+      if (stateHasGps) {
+        return {
+          ...vehicleJson,
+          deviceStatus: {
+            deviceType: vehicleJson.deviceType || 'Unknown',
+            gpsData: {
+              latitude:   parseFloat(state.lastLat),
+              longitude:  parseFloat(state.lastLng),
+              speed:      state.lastSpeed ?? 0,
+              altitude:   state.lastAltitude != null ? parseFloat(state.lastAltitude) : null,
+              satellites: state.lastSatellites ?? null,
+              course:     state.lastCourse ?? null,
+              timestamp:  state.lastPacketTime,
+            },
+            status:    { ignition: state.engineOn ?? false },
+            lastUpdate: state.lastPacketTime,
+          },
+        };
+      }
+    } else {
+      // Override ignition and lastUpdate (VehicleDeviceState is more accurate)
+      if (state.engineOn != null) deviceStatus.status.ignition = state.engineOn;
+      if (state.lastPacketTime)   deviceStatus.lastUpdate       = state.lastPacketTime;
+
+      // Fill GPS coords from VehicleDeviceState when MongoDB had no valid GPS
+      // (wrong deviceType → wrong collection queried, or no GPS-fix packets yet)
+      if (stateHasGps && !deviceStatus.gpsData?.latitude) {
+        deviceStatus.gpsData = {
+          ...(deviceStatus.gpsData || {}),
+          latitude:   parseFloat(state.lastLat),
+          longitude:  parseFloat(state.lastLng),
+          speed:      state.lastSpeed ?? 0,
+          altitude:   state.lastAltitude != null ? parseFloat(state.lastAltitude) : null,
+          satellites: state.lastSatellites ?? null,
+          course:     state.lastCourse ?? null,
+          timestamp:  state.lastPacketTime,
+        };
+      }
+    }
   }
 
   return { ...vehicleJson, deviceStatus };
@@ -605,8 +789,11 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
   });
 };
 
-const updateVehicle = async (id, clientId, data) => {
-  const vehicle = await Vehicle.findOne({ where: { id, clientId } });
+const updateVehicle = async (id, clientId, data, callerClientIds) => {
+  // Allow papa/dealer to edit any vehicle that belongs to their network.
+  // Fall back to exact-match when callerClientIds is not provided (old call sites).
+  const allIds = callerClientIds?.length ? callerClientIds : [clientId];
+  const vehicle = await Vehicle.findOne({ where: { id, clientId: allIds } });
   if (!vehicle) {
     const err = new Error('Vehicle not found');
     err.status = 404;

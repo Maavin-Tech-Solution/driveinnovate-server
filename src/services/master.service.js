@@ -296,7 +296,7 @@ const BUILT_INS = [
     name: 'AIS-140 VLTD (India)',
     type: 'AIS140',
     serverIp: null,
-    serverPort: 5029,
+    serverPort: 5025,   // ais140/ TCP server — matches PORT in ais140/.env
     mongoCollection: 'ais140locations',
     isBuiltIn: true,
     defaults: AIS140_DEFAULTS,

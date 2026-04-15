@@ -503,16 +503,27 @@ async function closeTripIfActive(tripId, endTime) {
  * Reprocess all historical packets from MongoDB for a vehicle in a date range.
  * Deletes existing trips/sessions/stops for the range and rebuilds from scratch.
  *
+ * Safe to call while the vehicle is live:
+ *   - Live VehicleDeviceState is saved and fully restored after reprocess so
+ *     today's tracking is never interrupted.
+ *   - The reprocessingVehicles lock uses the integer vehicleId so the change
+ *     stream is properly blocked during replay.
+ *
  * Works with any device type because processPacket() uses the normalizer.
  */
 async function reprocessVehicle(vehicleId, from, to) {
-  const { getMongoDb }  = require('../config/mongodb');
+  const { getMongoDb }   = require('../config/mongodb');
   const { DeviceConfig } = require('../models');
 
-  const vehicle = await Vehicle.findByPk(vehicleId);
+  // Normalise to integer — req.params.id arrives as a string; the Set must
+  // hold the same type that processPacket uses (vehicle.id = integer).
+  const vid = parseInt(vehicleId, 10);
+
+  const vehicle = await Vehicle.findByPk(vid);
   if (!vehicle || !vehicle.imei) return { processed: 0 };
 
-  reprocessingVehicles.add(vehicleId);
+  // Block live change-stream packets from racing with reprocess
+  reprocessingVehicles.add(vid);
 
   try {
     invalidateVehicleCache(vehicle.imei);
@@ -521,8 +532,7 @@ async function reprocessVehicle(vehicleId, from, to) {
     const fromDate = new Date(from);
     const toDate   = new Date(to);
 
-    // Determine collections to query.
-    // Prefer DeviceConfig.mongoCollection for accuracy; fall back to convention.
+    // ── 1. Resolve MongoDB collection for this device type ─────────────────
     const dtype = (vehicle.deviceType || '').toUpperCase();
     let collections = [];
 
@@ -531,73 +541,93 @@ async function reprocessVehicle(vehicleId, from, to) {
       : null;
 
     if (cfg?.mongoCollection) {
+      // DeviceConfig is authoritative
       collections = [{ colName: cfg.mongoCollection, deviceType: dtype }];
+    } else if (dtype === 'AIS140') {
+      collections = [{ colName: 'ais140locations', deviceType: 'AIS140' }];
     } else if (dtype.startsWith('FMB')) {
       collections = [{ colName: `${dtype.toLowerCase()}locations`, deviceType: dtype }];
     } else if (dtype === 'GT06') {
       collections = [{ colName: 'gt06locations', deviceType: 'GT06' }];
     } else {
-      // Unknown — try both legacy collections
+      // Unknown device type — try all known collections
       collections = [
-        { colName: 'fmb125locations', deviceType: 'FMB125' },
-        { colName: 'gt06locations',   deviceType: 'GT06'   },
+        { colName: 'ais140locations',  deviceType: 'AIS140' },
+        { colName: 'fmb125locations',  deviceType: 'FMB125' },
+        { colName: 'gt06locations',    deviceType: 'GT06'   },
       ];
     }
 
-    // Capture prior engine state before wiping
-    const priorState = await VehicleDeviceState.findOne({ where: { vehicleId } });
+    // ── 2. Snapshot live state so we can restore it after reprocess ────────
+    // This is critical: reprocess wipes VehicleDeviceState during replay.
+    // If the vehicle is live (lastPacketTime > toDate), we MUST restore the
+    // live state afterwards, otherwise today's tracking is wiped.
+    const liveSnap = await VehicleDeviceState.findOne({ where: { vehicleId: vid } });
+    const liveSnapJson = liveSnap ? liveSnap.toJSON() : null;
+    const liveIsNewer  = liveSnapJson?.lastPacketTime
+      && new Date(liveSnapJson.lastPacketTime) > toDate;
+
+    // Context to seed the reprocess state machine:
+    // Use the snapshot only if its lastPacketTime is *before* the range start
+    // so we carry the correct engineOn/fuel/etc. into the replay.
     const priorContext =
-      priorState?.lastPacketTime && new Date(priorState.lastPacketTime) < fromDate
+      liveSnapJson?.lastPacketTime && new Date(liveSnapJson.lastPacketTime) < fromDate
         ? {
-            engineOn:     priorState.engineOn,
-            engineOnSince: priorState.engineOn ? priorState.engineOnSince : null,
-            lastLat:      priorState.lastLat,
-            lastLng:      priorState.lastLng,
-            lastFuelLevel: priorState.lastFuelLevel,
-            lastOdometerReading: priorState.lastOdometerReading,
+            engineOn:            liveSnapJson.engineOn,
+            engineOnSince:       liveSnapJson.engineOn ? liveSnapJson.engineOnSince : null,
+            lastLat:             liveSnapJson.lastLat,
+            lastLng:             liveSnapJson.lastLng,
+            lastFuelLevel:       liveSnapJson.lastFuelLevel,
+            lastOdometerReading: liveSnapJson.lastOdometerReading,
           }
         : null;
 
-    // Reset device state
-    await VehicleDeviceState.destroy({ where: { vehicleId } });
+    // ── 3. Wipe device state; delete trips/sessions that overlap the range ─
+    await VehicleDeviceState.destroy({ where: { vehicleId: vid } });
 
-    // Remove existing records in range
+    // Only remove records strictly within or overlapping the requested range.
+    // The endTime: null guard excludes open records that started AFTER toDate
+    // (e.g. a trip that just started today — it must not be deleted).
     const spanOrInRange = (timeCol) => ({
-      vehicleId,
+      vehicleId: vid,
       [Op.or]: [
         { [timeCol]: { [Op.between]: [fromDate, toDate] } },
-        { [timeCol]: { [Op.lt]: fromDate }, endTime: { [Op.gt]: fromDate } },
-        { [timeCol]: { [Op.lt]: fromDate }, endTime: null },
+        { [timeCol]: { [Op.lt]: fromDate }, endTime: { [Op.between]: [fromDate, toDate] } },
+        // Open record that started before range — only if it actually started in
+        // the past (not an active record whose startTime is after toDate)
+        { [timeCol]: { [Op.between]: [fromDate, toDate] }, endTime: null },
       ],
     });
     await VehicleEngineSession.destroy({ where: spanOrInRange('startTime') });
-    await VehicleFuelEvent.destroy({ where: { vehicleId, eventTime: { [Op.between]: [fromDate, toDate] } } });
+    await VehicleFuelEvent.destroy({ where: { vehicleId: vid, eventTime: { [Op.between]: [fromDate, toDate] } } });
     await Trip.destroy({ where: spanOrInRange('startTime') });
     await Stop.destroy({ where: spanOrInRange('startTime') });
 
-    // Re-create device state, injecting prior context if available
+    // ── 4. Seed reprocess state (context from before the range if available)
     if (priorContext) {
       await VehicleDeviceState.create({
-        vehicleId,
-        imei: vehicle.imei,
-        engineOn:     priorContext.engineOn,
-        engineOnSince: priorContext.engineOnSince,
-        lastLat:      priorContext.lastLat,
-        lastLng:      priorContext.lastLng,
-        lastFuelLevel: priorContext.lastFuelLevel,
+        vehicleId:           vid,
+        imei:                vehicle.imei,
+        engineOn:            priorContext.engineOn,
+        engineOnSince:       priorContext.engineOnSince,
+        lastLat:             priorContext.lastLat,
+        lastLng:             priorContext.lastLng,
+        lastFuelLevel:       priorContext.lastFuelLevel,
         lastOdometerReading: priorContext.lastOdometerReading,
-        lastGpsPacketTime: priorContext.engineOn ? priorContext.engineOnSince : null,
+        lastGpsPacketTime:   priorContext.engineOn ? priorContext.engineOnSince : null,
       });
     }
 
-    // Replay packets in chronological order
+    // ── 5. Replay packets in chronological order ───────────────────────────
     const imeis = [vehicle.imei];
     if (vehicle.imei.startsWith('0')) imeis.push(vehicle.imei.slice(1));
     else imeis.push('0' + vehicle.imei);
 
     let processed = 0;
     for (const { colName, deviceType } of collections) {
-      const col = db.collection(colName);
+      let col;
+      try { col = db.collection(colName); } catch (_) { continue; }
+
       const cursor = col
         .find({ imei: { $in: imeis }, timestamp: { $gte: fromDate, $lte: toDate } })
         .sort({ timestamp: 1 });
@@ -608,9 +638,25 @@ async function reprocessVehicle(vehicleId, from, to) {
       }
     }
 
+    // ── 6. Restore live state if the vehicle was active after the range ─────
+    // Without this, reprocessing historical data would overwrite today's
+    // live tracking state (engine-on, current trip, last GPS, etc.).
+    if (liveIsNewer) {
+      const stateAfter = await VehicleDeviceState.findOne({ where: { vehicleId: vid } });
+      const { id: _id, createdAt: _c, updatedAt: _u, vehicleId: _v, ...restFields } = liveSnapJson;
+      if (stateAfter) {
+        await stateAfter.update(restFields);
+      } else {
+        await VehicleDeviceState.create({ vehicleId: vid, ...restFields });
+      }
+      console.log(`[Reprocess] Restored live state for vehicle ${vid} (lastPacket=${liveSnapJson.lastPacketTime})`);
+    }
+
+    console.log(`[Reprocess] Vehicle ${vid}: replayed ${processed} packets in range [${fromDate.toISOString()} – ${toDate.toISOString()}]`);
     return { processed };
+
   } finally {
-    reprocessingVehicles.delete(vehicleId);
+    reprocessingVehicles.delete(vid);
   }
 }
 

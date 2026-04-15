@@ -153,42 +153,50 @@ function normalizeFMB920(doc) {
 }
 
 /**
- * AIS-140 (Indian VLTD standard).
- * Packets arrive as parsed JSON from the AIS140 TCP parser.
- * Field names follow the AIS-140 NMEA-like convention.
+ * AIS-140 (Indian VLTD standard — Roadpoint vendor implementation).
+ * Field names match the ais140/ TCP server's MongoDB schema exactly.
+ *
+ * Key fields saved by the device server:
+ *   latitude, longitude, altitude, speed, heading (course), satellites
+ *   ignition (0/1), batteryVoltage (V), mainPowerVoltage (V)
+ *   gsmSignal, odometer, emergencyStatus, tamperAlert
+ *   packetType: LGN | NMR | HBT | EMG | ALT | AKN
  */
 function normalizeAIS140(doc) {
-  // AIS-140 parsers may use lat/lng OR latitude/longitude depending on implementation
-  const lat = parseFloat(doc.lat ?? doc.latitude) || null;
-  const lng = parseFloat(doc.lng ?? doc.longitude) || null;
-  const hasGps = lat !== null && lat !== 0 && lng !== null && lng !== 0;
+  const lat = parseFloat(doc.latitude) || null;
+  const lng = parseFloat(doc.longitude) || null;
+  const hasGps = lat !== null && lat !== 0 && lng !== null && lng !== 0
+               && doc.gpsValid !== false;
 
-  const ignition = doc.ignition !== undefined
-    ? !!doc.ignition
-    : (doc.acc !== undefined ? !!doc.acc : null);
+  // ignition is stored as 0/1 integer by the device server
+  const ignition = doc.ignition != null ? Boolean(doc.ignition) : null;
 
   return {
-    imei:        doc.imei || doc.vehicleId,
+    imei:        doc.imei,
     deviceType:  'AIS140',
-    timestamp:   new Date(doc.timestamp || doc.gpsTime || Date.now()),
+    timestamp:   new Date(doc.timestamp || Date.now()),
 
     lat:         hasGps ? lat : null,
     lng:         hasGps ? lng : null,
-    altitude:    null,
+    altitude:    doc.altitude  != null ? parseFloat(doc.altitude)  : null,
     speed:       parseFloat(doc.speed) || 0,
-    course:      doc.course != null ? parseInt(doc.course, 10) : null,
-    satellites:  null,
+    course:      doc.heading   != null ? parseInt(doc.heading, 10) : null,
+    satellites:  doc.satellites != null ? parseInt(doc.satellites, 10) : null,
     gpsFixed:    hasGps,
 
     ignition,
 
     fuel:            null,
-    odometer:        null,
-    battery:         doc.battery != null ? parseFloat(doc.battery) : null,
-    externalVoltage: doc.externalVoltage != null ? parseFloat(doc.externalVoltage) : null,
-    gsmSignal:       null,
+    odometer:        doc.odometer != null ? parseFloat(doc.odometer) : null,
+    battery:         doc.batteryVoltage   != null ? parseFloat(doc.batteryVoltage)   : null,
+    externalVoltage: doc.mainPowerVoltage != null ? parseFloat(doc.mainPowerVoltage) : null,
+    gsmSignal:       doc.gsmSignal != null ? parseInt(doc.gsmSignal, 10) : null,
 
-    packetType:  doc.messageType || doc.packetType || null,
+    // AIS-140 specific — carried through for the Emergency state check
+    emergency:   doc.emergencyStatus ? true : false,
+    tamper:      doc.tamperAlert     ? true : false,
+
+    packetType:  doc.packetType || null,
     ioElements:  null,
     raw:         doc.raw || null,
 

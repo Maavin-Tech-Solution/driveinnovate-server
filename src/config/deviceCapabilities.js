@@ -155,44 +155,53 @@ const DEVICE_CAPABILITIES = {
 
   // ─── AIS140 ───────────────────────────────────────────────────────────────
   // IRNSS AIS-140 standard (VLTD) — Indian government mandate.
-  // Reports ignition, speed, location, emergency panic.  No fuel sensor.
+  // Reports ignition, speed, GPS, emergency panic, GSM cell, odometer.
   AIS140: {
     displayName: 'AIS-140 VLTD',
-    ignitionSource: 'ignition-io',
+    ignitionSource: 'ignition-io',   // dedicated field[21] — reliable signal
 
+    // GPS
     supportsGps: true,
-    supportsAltitude: false,
-    supportsSatellites: false,
-    supportsCourse: true,
+    supportsAltitude: true,          // field[17] altitude in metres
+    supportsSatellites: true,        // field[16] satellite count
+    supportsCourse: true,            // field[15] heading in degrees
 
-    supportsBattery: true,
-    supportsExternalVoltage: true,
+    // Electrical
+    supportsBattery: true,           // field[24] battery voltage (V)
+    supportsExternalVoltage: true,   // field[23] main power voltage (V)
     supportsExternalBattery: false,
 
-    supportsOdometer: false,
+    // Engine / motion
+    supportsOdometer: true,          // field[41] odometer in km
     supportsFuel: false,
     supportsRpm: false,
     supportsTemperature: false,
 
-    supportsGsmSignal: false,
-    supportsCellTower: false,
+    // Cell / network
+    supportsGsmSignal: true,         // field[27] GSM signal strength (0-5)
+    supportsCellTower: true,         // fields[28-31] MCC/MNC/LAC/CellID
 
-    supportsDigitalInputs: true,     // Emergency/panic button, door sensor
-    supportsAnalogInputs: false,
+    // I/O
+    supportsDigitalInputs: true,     // DI1–DI4 + emergency/tamper
+    supportsAnalogInputs: true,      // AI1–AI2
     supportsCustomIo: false,
 
+    // Emergency — unique to AIS-140
+    supportsEmergency: true,         // field[25] panic button
+
     mongoCollection: 'ais140locations',
-    packetTypeField: 'messageType',
-    latField: 'lat',
-    lngField: 'lng',
+    packetTypeField: 'packetType',   // LGN | NMR | HBT | EMG | ALT | AKN
+    latField: 'latitude',
+    lngField: 'longitude',
     accField: 'ignition',
     ignitionField: 'ignition',
     fuelField: null,
-    odometerField: null,
-    batteryField: 'battery',
-    altitudeField: null,
-    satellitesField: null,
-    signalField: null,
+    odometerField: 'odometer',
+    batteryField: 'batteryVoltage',
+    altitudeField: 'altitude',
+    satellitesField: 'satellites',
+    signalField: 'gsmSignal',
+    externalVoltageField: 'mainPowerVoltage',
   },
 
   // ─── GENERIC ──────────────────────────────────────────────────────────────

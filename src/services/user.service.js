@@ -204,6 +204,53 @@ const getClientDetail = async (callerClientIds, clientId) => {
   };
 };
 
+/**
+ * Recursively build a full client tree rooted at parentId.
+ * Returns nested array of clients, each with vehicleCount and children[].
+ * depth guard prevents runaway recursion on corrupted data.
+ */
+const buildClientTree = async (parentId, depth = 0) => {
+  if (depth > 10) return [];
+
+  const clients = await User.findAll({
+    where: { parentId },
+    attributes: { exclude: ['password'] },
+    include: [{ model: UserMeta, as: 'meta', required: false }],
+    order: [['name', 'ASC']],
+  });
+
+  if (!clients.length) return [];
+
+  const ids = clients.map(c => c.id);
+
+  // Vehicle counts (batch)
+  const vcRows = await Vehicle.findAll({
+    where: { clientId: ids },
+    attributes: ['clientId', [fn('COUNT', col('id')), 'cnt']],
+    group: ['clientId'],
+    raw: true,
+  });
+  const vcMap = Object.fromEntries(vcRows.map(r => [r.clientId, Number(r.cnt)]));
+
+  // Recursively build children for each client in parallel
+  const result = await Promise.all(
+    clients.map(async (c) => {
+      const children = await buildClientTree(c.id, depth + 1);
+      // Aggregate total vehicles across entire sub-tree
+      const networkVehicleCount = (vcMap[c.id] || 0) +
+        children.reduce((s, ch) => s + (ch.networkVehicleCount || 0), 0);
+      return {
+        ...c.toJSON(),
+        vehicleCount: vcMap[c.id] || 0,
+        networkVehicleCount,
+        children,
+      };
+    })
+  );
+
+  return result;
+};
+
 module.exports = {
   getProfile,
   updateProfile,
@@ -212,4 +259,5 @@ module.exports = {
   createClient,
   listClients,
   getClientDetail,
+  buildClientTree,
 };

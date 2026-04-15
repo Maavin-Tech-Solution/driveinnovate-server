@@ -186,11 +186,71 @@ fmb125LocationSchema.index({ imei: 1, timestamp: 1 });
 
 const FMB125Location = mongoose.model('FMB125Location', fmb125LocationSchema);
 
-module.exports = { 
-  connectMongoDB, 
+// ─── AIS-140 / VLTD Location schema ──────────────────────────────────────────
+// Matches the field set saved by the ais140/ TCP server.
+const ais140LocationSchema = new mongoose.Schema({
+  imei:             { type: String, required: true },
+  vehicleRegNo:     String,
+  vendorId:         String,
+  firmwareVersion:  String,
+  deviceType:       { type: String, default: 'AIS140' },
+  packetType:       String,   // LGN | NMR | HBT | EMG | ALT
+  packetStatus:     String,   // L (live) | H (history)
+  replyNumber:      Number,
+  timestamp:        { type: Date, index: true },
+  // GPS
+  latitude:         Number,
+  longitude:        Number,
+  latDir:           String,   // N / S
+  lngDir:           String,   // E / W
+  altitude:         Number,
+  speed:            Number,
+  heading:          Number,
+  satellites:       Number,
+  pdop:             Number,
+  hdop:             Number,
+  gpsValid:         Boolean,
+  // Cell / network
+  mcc:              String,
+  mnc:              String,
+  lac:              String,
+  cellId:           String,
+  gsmSignal:        Number,
+  operatorName:     String,
+  // Power
+  ignition:         Number,   // 0 or 1
+  mainPowerStatus:  Number,
+  mainPowerVoltage: Number,   // Volts
+  batteryVoltage:   Number,   // Volts
+  // Alerts
+  emergencyStatus:  Number,   // 0 or 1
+  tamperAlert:      Number,   // 0 or 1
+  alertType:        String,
+  // Digital I/O
+  di1: Number, di2: Number, di3: Number, di4: Number,
+  do1: Number, do2: Number,
+  ai1: Number, ai2: Number,
+  // Odometer
+  odometer:         Number,   // km
+  // Raw
+  raw: String,
+}, {
+  collection: 'ais140locations',
+  timestamps: true,
+  strict: false,
+});
+
+ais140LocationSchema.index({ imei: 1, timestamp: -1 });
+ais140LocationSchema.index({ imei: 1, timestamp: 1 });
+
+const AIS140Location = mongoose.model('AIS140Location', ais140LocationSchema);
+
+module.exports = {
+  connectMongoDB,
   getMongoDb,
   Location,
   FMB125Location,
+  AIS140Location,
   MONGODB_PORT,
   isMongoDBConnected
 };

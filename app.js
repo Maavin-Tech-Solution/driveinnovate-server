@@ -134,6 +134,7 @@ async function startChangeStreams() {
     configs = [
       { mongoCollection: 'fmb125locations', type: 'FMB125' },
       { mongoCollection: 'gt06locations',   type: 'GT06'   },
+      { mongoCollection: 'ais140locations', type: 'AIS140' },
     ];
   }
 

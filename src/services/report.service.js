@@ -499,9 +499,12 @@ class ReportService {
     for (let i = 0; i < locations.length; i++) {
       const loc = locations[i];
       const speed = loc.speed || 0;
-      // Normalize ignition: GT06 uses 'acc', FMB125 uses 'ignition'
+      // Normalize ignition across device types:
+      //   GT06   → loc.acc  (boolean)
+      //   FMB125 → loc.ignition (boolean)
+      //   AIS140 → loc.ignition (0/1 integer)
       const rawIgnition = loc.acc !== undefined ? loc.acc : loc.ignition;
-      const ignitionOff = rawIgnition === false; // explicitly false, not undefined
+      const ignitionOff = rawIgnition === false || rawIgnition === 0;
       const isMoving = speed >= SPEED_THRESHOLD;
 
       if (!currentTrip) {
@@ -794,7 +797,7 @@ class ReportService {
     for (let i = 0; i < locations.length; i++) {
       const loc = locations[i];
       const speed = loc.speed || 0;
-      // Normalize ignition: GT06 uses 'acc', FMB125 uses 'ignition'
+      // Normalize ignition across device types (GT06: acc bool, FMB: ignition bool, AIS140: ignition 0/1)
       const ignition = loc.acc !== undefined ? loc.acc : loc.ignition;
       const isMoving = speed >= 2; // consistent with trip speed threshold
 
@@ -1000,6 +1003,7 @@ class ReportService {
   _getCollectionForDevice(deviceType) {
     if (!deviceType) return 'gt06locations';
     const dt = deviceType.toUpperCase();
+    if (dt === 'AIS140')                         return 'ais140locations';
     if (dt === 'FMB125' || dt.startsWith('FMB')) return 'fmb125locations';
     return 'gt06locations'; // GT06 and others default
   }

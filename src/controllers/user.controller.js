@@ -70,6 +70,14 @@ const updateNotifications = async (req, res) => {
  */
 const createClient = async (req, res) => {
   try {
+    // Allow papa (parentId === 0), dealer (has children), or any user with canAddClient permission
+    const isPapa = Number(req.user.parentId) === 0;
+    const isDealer = req.user.role === 'dealer';
+    const hasPermission = req.user.permissions?.canAddClient === true;
+    if (!isPapa && !isDealer && !hasPermission) {
+      return res.status(403).json({ success: false, message: 'You do not have permission to add clients.' });
+    }
+
     const { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin } = req.body;
     if (!name || !email || !phone || !password) {
       return res.status(400).json({ success: false, message: 'name, email, phone and password are required' });
@@ -127,4 +135,18 @@ const getClientDetail = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail };
+/**
+ * GET /api/users/client-tree
+ * Returns the full recursive client tree for the current user.
+ * Any authenticated user with canAddClient permission (or papa/dealer) may call this.
+ */
+const getClientTree = async (req, res) => {
+  try {
+    const tree = await userService.buildClientTree(req.user.id);
+    return res.json({ success: true, data: tree });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree };

@@ -3,7 +3,7 @@ const { Op } = require('sequelize');
 const { Location } = require('../config/mongodb');
 
 const getStats = async (userId) => {
-  const vehicles = await Vehicle.findAll({ where: { userId } });
+  const vehicles = await Vehicle.findAll({ where: { clientId: userId } });
   const vehicleIds = vehicles.map((v) => v.id);
 
   const [totalChallans, pendingChallans, challanAmountResult, vehicleRenewals] = await Promise.all([

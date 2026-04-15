@@ -15,6 +15,9 @@ router.put('/me/password', validateConsumer, userController.updatePassword);
 // PUT /api/users/me/notifications - update notification preferences
 router.put('/me/notifications', validateConsumer, userController.updateNotifications);
 
+// GET  /api/users/client-tree - full recursive client tree (all descendants)
+router.get('/client-tree', validateConsumer, userController.getClientTree);
+
 // GET  /api/users/clients - list direct children of current user
 router.get('/clients', validateConsumer, userController.listClients);
 

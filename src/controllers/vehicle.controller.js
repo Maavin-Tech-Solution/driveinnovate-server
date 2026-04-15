@@ -26,15 +26,32 @@ const getVehicleById = async (req, res) => {
 
 /**
  * POST /api/vehicles
- * Body: { vehicleNumber, chasisNumber, engineNumber, imei }
+ * Body: { vehicleNumber, chasisNumber, engineNumber, imei, ...
+ *         forClientId? } — papa/dealer can assign to a child client
  */
 const addVehicle = async (req, res) => {
   try {
-    const { vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, deviceName, deviceType, serverIp, serverPort, vehicleIcon } = req.body;
+    const {
+      vehicleNumber, vehicleName, chasisNumber, engineNumber, imei,
+      deviceName, deviceType, serverIp, serverPort, vehicleIcon,
+      forClientId,
+    } = req.body;
+
     if (!vehicleNumber && !chasisNumber && !engineNumber && !imei) {
       return res.status(400).json({ success: false, message: 'At least one of vehicleNumber, chasisNumber, engineNumber or imei is required' });
     }
-    const vehicle = await vehicleService.addVehicle(req.user.id, {
+
+    // If caller wants to assign the vehicle to a different client, verify access
+    let effectiveClientId = req.user.id;
+    if (forClientId) {
+      const targetId = Number(forClientId);
+      if (!req.user.clientIds?.includes(targetId)) {
+        return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
+      }
+      effectiveClientId = targetId;
+    }
+
+    const vehicle = await vehicleService.addVehicle(effectiveClientId, {
       vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, deviceName, deviceType, serverIp, serverPort, vehicleIcon,
     });
     return res.status(201).json({ success: true, message: 'Vehicle registered successfully', data: vehicle });
@@ -45,11 +62,19 @@ const addVehicle = async (req, res) => {
 
 /**
  * PUT /api/vehicles/:id
- * Body: { name, imei, deviceType, make, model, year, status }
+ * Body: { name, imei, deviceType, make, model, year, status,
+ *         clientId? } — papa/dealer can reassign to a child client
  */
 const updateVehicle = async (req, res) => {
   try {
-    const vehicle = await vehicleService.updateVehicle(req.params.id, req.user.id, req.body);
+    // If caller wants to reassign to a different client, verify access
+    if (req.body.clientId) {
+      const targetId = Number(req.body.clientId);
+      if (!req.user.clientIds?.includes(targetId)) {
+        return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
+      }
+    }
+    const vehicle = await vehicleService.updateVehicle(req.params.id, req.user.id, req.body, req.user.clientIds);
     return res.json({ success: true, message: 'Vehicle updated successfully', data: vehicle });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

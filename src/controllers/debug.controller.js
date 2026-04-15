@@ -9,6 +9,8 @@ const getModelForDeviceType = (deviceType) => {
     return mongoose.models.GT06Location || mongoose.model('GT06Location', new mongoose.Schema({}, { strict: false }), 'gt06locations');
   } else if (deviceType === 'fmb125') {
     return mongoose.models.FMB125Location || mongoose.model('FMB125Location', new mongoose.Schema({}, { strict: false }), 'fmb125locations');
+  } else if (deviceType === 'ais140') {
+    return mongoose.models.Ais140Location || mongoose.model('Ais140Location', new mongoose.Schema({}, { strict: false }), 'ais140locations');
   }
   return null;
 };
@@ -73,9 +75,10 @@ const getDataPackets = async (req, res) => {
     // Packet type
     if (packetType && packetType !== 'all') filter.packetType = packetType;
 
-    // ACC
-    if (acc === 'true')  filter.acc = true;
-    else if (acc === 'false') filter.acc = false;
+    // ACC / ignition — AIS140 uses `ignition` (0/1 Number), others use `acc` (Boolean)
+    const isAis140 = (deviceType || '').toLowerCase() === 'ais140';
+    if (acc === 'true')       isAis140 ? (filter.ignition = 1) : (filter.acc = true);
+    else if (acc === 'false') isAis140 ? (filter.ignition = 0) : (filter.acc = false);
 
     // Has GPS
     if (hasGps === 'yes') {
@@ -159,7 +162,14 @@ const getVehicleStatus = async (req, res) => {
     let mongoData = null;
     try {
       const db = getMongoDb();
-      const collections = ['gt06locations', 'fmb125locations'];
+      const dtype = (vehicle.deviceType || '').toLowerCase();
+      const collections = dtype === 'ais140'
+        ? ['ais140locations']
+        : dtype.startsWith('fmb')
+          ? [`${dtype}locations`]
+          : dtype === 'gt06'
+            ? ['gt06locations']
+            : ['gt06locations', 'fmb125locations', 'ais140locations'];
       mongoData = {};
 
       for (const colName of collections) {
