@@ -17,6 +17,7 @@ const VehicleDeviceState = require('./VehicleDeviceState');
 const VehicleGroup = require('./VehicleGroup');
 const VehicleGroupMember = require('./VehicleGroupMember');
 const TripShare = require('./TripShare');
+const LiveShare = require('./LiveShare');
 const Alert = require('./Alert');
 const Notification = require('./Notification');
 const SupportTicket = require('./SupportTicket');
@@ -149,6 +150,7 @@ module.exports = {
   VehicleGroup,
   VehicleGroupMember,
   TripShare,
+  LiveShare,
   Alert,
   Notification,
   SupportTicket,

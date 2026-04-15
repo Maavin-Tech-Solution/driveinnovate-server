@@ -2,10 +2,20 @@ const vehicleService = require('../services/vehicle.service');
 
 /**
  * GET /api/vehicles
+ * Optional ?clientId=X — admin/papa/dealer can view a child client's fleet.
+ * X must be in req.user.clientIds (the user's full descendant tree).
  */
 const getVehicles = async (req, res) => {
   try {
-    const vehicles = await vehicleService.getVehicles(req.user.id);
+    let effectiveClientId = req.user.id;
+    if (req.query.clientId) {
+      const targetId = Number(req.query.clientId);
+      if (!req.user.clientIds?.includes(targetId)) {
+        return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
+      }
+      effectiveClientId = targetId;
+    }
+    const vehicles = await vehicleService.getVehicles(effectiveClientId);
     return res.json({ success: true, data: vehicles });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
@@ -159,7 +169,15 @@ const getLocationPlayerData = async (req, res) => {
  */
 const getLivePositions = async (req, res) => {
   try {
-    const data = await vehicleService.getLivePositions(req.user.id, req.query.since);
+    let effectiveClientId = req.user.id;
+    if (req.query.clientId) {
+      const targetId = Number(req.query.clientId);
+      if (!req.user.clientIds?.includes(targetId)) {
+        return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
+      }
+      effectiveClientId = targetId;
+    }
+    const data = await vehicleService.getLivePositions(effectiveClientId, req.query.since);
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
