@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { TripShare, LiveShare, Vehicle, VehicleGroup, VehicleGroupMember, VehicleDeviceState } = require('../models');
 const { Location, FMB125Location, isMongoDBConnected } = require('../config/mongodb');
+const { getSystemSettings } = require('./master.service');
 
 const FMB125_DEVICE_TYPES = ['FMB125', 'FMB120', 'FMB130', 'FMB140', 'FMB920'];
 const getLocationModel = (deviceType) =>
@@ -87,12 +88,27 @@ const getTripShareData = async (token) => {
 /**
  * Create a live-tracking share link.
  * @param {'vehicle'|'group'} shareType
- * @param {object}  target       - { vehicleId } or { groupId }
- * @param {number}  clientId     - creator's id
- * @param {number[]} clientIds   - full accessible descendant IDs (for ownership check)
+ * @param {object}  target        - { vehicleId } or { groupId }
+ * @param {number}  clientId      - creator's id
+ * @param {number[]} clientIds    - full accessible descendant IDs (for ownership check)
  * @param {string|Date} expiresAt - ISO datetime for when the share expires
+ * @param {object}  permissions   - req.user.permissions object
  */
-const createLiveShare = async (shareType, target, clientId, clientIds, expiresAt) => {
+const createLiveShare = async (shareType, target, clientId, clientIds, expiresAt, permissions) => {
+  // ── Feature-flag check ───────────────────────────────────────────────────
+  const settings = await getSystemSettings();
+  if (!settings.liveShareEnabled) {
+    const err = new Error('Live sharing is not enabled on this platform');
+    err.status = 403;
+    throw err;
+  }
+
+  // ── Permission check (papa always has canShareLiveLocation = true) ───────
+  if (!permissions?.canShareLiveLocation) {
+    const err = new Error('You do not have permission to share live location');
+    err.status = 403;
+    throw err;
+  }
   const expiry = new Date(expiresAt);
   if (isNaN(expiry.getTime())) {
     const err = new Error('Invalid expiresAt value');

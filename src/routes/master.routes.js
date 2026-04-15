@@ -26,4 +26,8 @@ router.put('/states/:stateId',                    validateConsumer, requirePapa,
 router.delete('/states/:stateId',                 validateConsumer, requirePapa, ctrl.deleteState);
 router.post('/device-configs/:id/reset-states',   validateConsumer, requirePapa, ctrl.reseedStates);
 
+// System Settings — read is open to all authenticated users; write is papa-only
+router.get('/settings',  validateConsumer,            ctrl.getSettings);
+router.put('/settings',  validateConsumer, requirePapa, ctrl.updateSettings);
+
 module.exports = router;

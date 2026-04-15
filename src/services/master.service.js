@@ -477,6 +477,37 @@ const getAllStateDefinitions = async () => {
   return states.map(s => s.toJSON());
 };
 
+// ─── System Settings ─────────────────────────────────────────────────────────
+
+const { SystemSetting } = require('../models');
+
+const DEFAULT_SETTINGS = { liveShareEnabled: false };
+
+/**
+ * Returns the single system-settings row, creating it with defaults if absent.
+ */
+const getSystemSettings = async () => {
+  let row = await SystemSetting.findByPk(1);
+  if (!row) {
+    row = await SystemSetting.create({ id: 1, ...DEFAULT_SETTINGS });
+  }
+  return { liveShareEnabled: Boolean(row.liveShareEnabled) };
+};
+
+/**
+ * Upserts the single settings row.  Only known keys are applied.
+ * @param {object} updates – e.g. { liveShareEnabled: true }
+ */
+const updateSystemSettings = async (updates) => {
+  const allowed = ['liveShareEnabled'];
+  const safe = {};
+  for (const k of allowed) {
+    if (k in updates) safe[k] = Boolean(updates[k]);
+  }
+  await SystemSetting.upsert({ id: 1, ...safe });
+  return getSystemSettings();
+};
+
 module.exports = {
   seedBuiltIns,
   reseedBuiltInStates,
@@ -489,4 +520,6 @@ module.exports = {
   updateState,
   deleteState,
   getAllStateDefinitions,
+  getSystemSettings,
+  updateSystemSettings,
 };

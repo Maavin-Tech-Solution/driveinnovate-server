@@ -95,6 +95,26 @@ const reseedStates = async (req, res) => {
   }
 };
 
+// ─── System Settings ─────────────────────────────────────────────────────────
+
+const getSettings = async (req, res) => {
+  try {
+    const data = await svc.getSystemSettings();
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+const updateSettings = async (req, res) => {
+  try {
+    const data = await svc.updateSystemSettings(req.body);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   listDeviceConfigs,
   createDeviceConfig,
@@ -105,4 +125,6 @@ module.exports = {
   updateState,
   deleteState,
   reseedStates,
+  getSettings,
+  updateSettings,
 };

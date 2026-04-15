@@ -55,6 +55,7 @@ exports.createLiveShare = async (req, res) => {
       req.user.id,
       req.user.clientIds || [req.user.id],
       expiresAt,
+      req.user.permissions,
     );
     return res.json({ success: true, data: result });
   } catch (err) {

@@ -26,6 +26,7 @@ const GeofenceAssignment = require('./GeofenceAssignment');
 const UserPermission = require('./UserPermission');
 const DeviceConfig = require('./DeviceConfig');
 const StateDefinition = require('./StateDefinition');
+const SystemSetting = require('./SystemSetting');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -159,4 +160,5 @@ module.exports = {
   UserPermission,
   DeviceConfig,
   StateDefinition,
+  SystemSetting,
 };
