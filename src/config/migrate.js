@@ -40,6 +40,34 @@ const MIGRATIONS = [
   { table: 'vehicle_engine_sessions', column: 'idle_seconds',    ddl: 'INT NULL DEFAULT 0 COMMENT "Seconds engine ON speed=0 in session"' },
   { table: 'vehicle_engine_sessions', column: 'odometer_start',  ddl: 'DECIMAL(14,3) NULL COMMENT "Hardware odometer at session start"' },
   { table: 'vehicle_engine_sessions', column: 'odometer_end',    ddl: 'DECIMAL(14,3) NULL COMMENT "Hardware odometer at session end"' },
+
+  // ── di_user (account type & trial expiry) ─────────────────────────────────
+  { table: 'di_user', column: 'account_type',    ddl: "ENUM('trial','billable','demo','master') NOT NULL DEFAULT 'trial' COMMENT \"Account subscription type\"" },
+  { table: 'di_user', column: 'trial_expires_at', ddl: 'DATETIME NULL COMMENT "Trial expiry timestamp; NULL = no expiry enforced"' },
+
+  // ── di_user_vehicle (per-vehicle subscription expiry) ────────────────────
+  { table: 'di_user_vehicle', column: 'subscription_expires_at', ddl: 'DATETIME NULL COMMENT "Billable subscription expiry per vehicle"' },
+
+  // ── system_settings (trial feature flag + duration) ───────────────────────
+  { table: 'system_settings', column: 'trial_account_enabled', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Master switch for trial account expiry enforcement"' },
+  { table: 'system_settings', column: 'trial_duration_days',   ddl: 'INT NOT NULL DEFAULT 30 COMMENT "Default trial period in days for new accounts"' },
+];
+
+/**
+ * ENUM patches: applied when the column exists but may be missing a value.
+ * Each entry checks INFORMATION_SCHEMA.COLUMNS for the exact COLUMN_TYPE and
+ * runs MODIFY COLUMN if the expected value isn't present.
+ *
+ * Safe to run every start — the MODIFY is skipped when the ENUM already
+ * contains the required value.
+ */
+const ENUM_PATCHES = [
+  {
+    table:        'di_user',
+    column:       'account_type',
+    mustContain:  'master',
+    fullDdl:      "ENUM('trial','billable','demo','master') NOT NULL DEFAULT 'trial' COMMENT \"Account subscription type\"",
+  },
 ];
 
 async function runMigrations() {
@@ -60,10 +88,24 @@ async function runMigrations() {
     }
   }
 
+  // Apply ENUM patches (expand enum values on existing columns)
+  for (const { table, column, mustContain, fullDdl } of ENUM_PATCHES) {
+    const [[row]] = await sequelize.query(
+      `SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :table AND COLUMN_NAME = :column`,
+      { replacements: { db, table, column } }
+    );
+    if (row && !row.COLUMN_TYPE.includes(mustContain)) {
+      await sequelize.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${column}\` ${fullDdl}`);
+      console.log(`[migrate] ✓ Patched ENUM ${table}.${column} → added '${mustContain}'`);
+      added++;
+    }
+  }
+
   if (added === 0) {
     console.log('[migrate] All columns up to date — nothing to add');
   } else {
-    console.log(`[migrate] Done — added ${added} column(s)`);
+    console.log(`[migrate] Done — added/patched ${added} column(s)`);
   }
 }
 

@@ -36,7 +36,7 @@ const User = sequelize.define(
       defaultValue: 'active',
     },
     accountType: {
-      type: DataTypes.ENUM('trial', 'billable', 'demo'),
+      type: DataTypes.ENUM('trial', 'billable', 'demo', 'master'),
       defaultValue: 'trial',
       allowNull: false,
     },
