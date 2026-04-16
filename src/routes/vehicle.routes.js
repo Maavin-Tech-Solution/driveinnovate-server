@@ -47,8 +47,5 @@ router.get('/:id/reports/fuel-fillings', validateConsumer, vehicleReportControll
 router.get('/:id/reports/export',        validateConsumer, vehicleReportController.exportReport);
 router.get('/:id/reports/export-xlsx',   validateConsumer, vehicleReportController.exportExcel);
 router.get('/:id/reports/raw-packets',   validateConsumer, vehicleReportController.getRawPackets);
-router.post('/:id/reports/reprocess',    validateConsumer, vehicleReportController.reprocess);
-router.post('/:id/reports/reprocess-bg', validateConsumer, vehicleReportController.reprocessBg);
-router.get('/:id/reports/reprocess-status', validateConsumer, vehicleReportController.reprocessStatus);
 
 module.exports = router;

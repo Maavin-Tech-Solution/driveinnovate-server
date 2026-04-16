@@ -103,6 +103,14 @@ const Trip = sequelize.define('Trip', {
     comment: 'Peak speed in the trip (km/h)',
   },
 
+  // ── Status ────────────────────────────────────────────────────────────────
+  status: {
+    type: DataTypes.ENUM('in_progress', 'completed'),
+    allowNull: false,
+    defaultValue: 'completed',
+    comment: 'in_progress = engine on, trip still running; completed = ended',
+  },
+
   // ── Stoppages ─────────────────────────────────────────────────────────────
   stoppageCount: {
     type: DataTypes.SMALLINT.UNSIGNED, allowNull: true, defaultValue: 0, field: 'stoppage_count',

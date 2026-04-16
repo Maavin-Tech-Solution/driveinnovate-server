@@ -28,6 +28,7 @@ const MIGRATIONS = [
   { table: 'vehicle_device_states', column: 'last_gps_packet_time',  ddl: 'DATETIME(6) NULL COMMENT "Time of last GPS-bearing packet"' },
 
   // ── trips ──────────────────────────────────────────────────────────────────
+  { table: 'trips', column: 'status', ddl: "ENUM('in_progress','completed') NOT NULL DEFAULT 'completed' COMMENT \"Trip lifecycle state\"" },
   { table: 'trips', column: 'driving_time_seconds', ddl: 'INT NULL DEFAULT 0 COMMENT "Seconds speed>0"' },
   { table: 'trips', column: 'engine_idle_seconds',  ddl: 'INT NULL DEFAULT 0 COMMENT "Seconds engine ON speed=0"' },
   { table: 'trips', column: 'idle_time',            ddl: 'INT NULL COMMENT "Alias for engine_idle_seconds"' },

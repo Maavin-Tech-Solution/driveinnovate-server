@@ -352,6 +352,7 @@ async function getTrips(vehicleId, from, to, limit = 200, offset = 0) {
     total: count,
     rows: trips.map((t, i) => ({
       no: offset + i + 1,
+      status: t.status || 'completed',
       beginning: t.startTime,
       end: t.endTime,
       startLocation: t.startLocation || `${t.startLatitude},${t.startLongitude}`,
