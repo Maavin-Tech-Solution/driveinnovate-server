@@ -481,7 +481,11 @@ const getAllStateDefinitions = async () => {
 
 const { SystemSetting } = require('../models');
 
-const DEFAULT_SETTINGS = { liveShareEnabled: false };
+const DEFAULT_SETTINGS = {
+  liveShareEnabled:    false,
+  trialAccountEnabled: false,
+  trialDurationDays:   30,
+};
 
 /**
  * Returns the single system-settings row, creating it with defaults if absent.
@@ -491,18 +495,29 @@ const getSystemSettings = async () => {
   if (!row) {
     row = await SystemSetting.create({ id: 1, ...DEFAULT_SETTINGS });
   }
-  return { liveShareEnabled: Boolean(row.liveShareEnabled) };
+  return {
+    liveShareEnabled:    Boolean(row.liveShareEnabled),
+    trialAccountEnabled: Boolean(row.trialAccountEnabled),
+    trialDurationDays:   Number(row.trialDurationDays) || 30,
+  };
 };
 
 /**
  * Upserts the single settings row.  Only known keys are applied.
- * @param {object} updates – e.g. { liveShareEnabled: true }
+ * @param {object} updates – e.g. { liveShareEnabled: true, trialDurationDays: 14 }
  */
 const updateSystemSettings = async (updates) => {
-  const allowed = ['liveShareEnabled'];
+  const boolKeys = ['liveShareEnabled', 'trialAccountEnabled'];
+  const intKeys  = ['trialDurationDays'];
   const safe = {};
-  for (const k of allowed) {
+  for (const k of boolKeys) {
     if (k in updates) safe[k] = Boolean(updates[k]);
+  }
+  for (const k of intKeys) {
+    if (k in updates) {
+      const v = parseInt(updates[k], 10);
+      if (!isNaN(v) && v > 0) safe[k] = v;
+    }
   }
   await SystemSetting.upsert({ id: 1, ...safe });
   return getSystemSettings();

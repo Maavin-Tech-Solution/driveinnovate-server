@@ -163,4 +163,90 @@ function buildAlertEmailHtml({ alertName, alertType, vehicleNumber, vehicleName,
 </html>`;
 }
 
-module.exports = { sendAlertEmail, buildAlertEmailHtml, getRecipients };
+/**
+ * Send a trial expiry warning email.
+ * @param {object} opts
+ * @param {string}   opts.clientName
+ * @param {string}   opts.clientEmail
+ * @param {string}   opts.dealerEmail    — may be null if client is direct under papa
+ * @param {string}   opts.papaEmail      — top-level admin email
+ * @param {Date}     opts.trialExpiresAt
+ * @param {number}   opts.daysLeft
+ */
+async function sendTrialExpiryWarningEmail({ clientName, clientEmail, dealerEmail, papaEmail, trialExpiresAt, daysLeft }) {
+  const recipients = [...new Set([clientEmail, dealerEmail, papaEmail].filter(Boolean))];
+  if (!recipients.length) return;
+
+  const from = `"${process.env.EMAIL_FROM_NAME || 'DriveInnovate'}" <${process.env.EMAIL_USER || 'no-reply@driveinnovate.in'}>`;
+  const expiryStr = new Date(trialExpiresAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+  const urgencyColor = daysLeft <= 2 ? '#dc2626' : daysLeft <= 4 ? '#d97706' : '#2563eb';
+
+  const htmlBody = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"/></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:32px 0">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.10)">
+        <tr>
+          <td style="background:linear-gradient(135deg,#1e3a5f,#2563eb);padding:24px 32px">
+            <div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.02em">⏳ Trial Expiry Notice</div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.75);margin-top:4px">DriveInnovate Fleet Management</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:28px 32px">
+            <span style="display:inline-block;background:${urgencyColor}18;color:${urgencyColor};border:1px solid ${urgencyColor}40;padding:5px 14px;border-radius:20px;font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase">
+              ${daysLeft === 0 ? 'Expires Today' : `${daysLeft} Day${daysLeft === 1 ? '' : 's'} Left`}
+            </span>
+            <div style="font-size:20px;font-weight:800;color:#0f172a;margin-top:16px">Trial Account Expiring Soon</div>
+            <div style="font-size:15px;color:#374151;margin-top:8px;line-height:1.6">
+              The trial account for <strong>${clientName}</strong> will expire on <strong>${expiryStr}</strong>.
+              After expiry, the account will not be able to login until it is upgraded to a billable plan.
+            </div>
+            <table style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;width:100%;margin-top:20px" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="padding:8px 14px;color:#64748b;font-size:13px;font-weight:600;width:140px">Account</td>
+                <td style="padding:8px 14px;color:#0f172a;font-size:13px;font-weight:700">${clientName}</td>
+              </tr>
+              <tr style="border-top:1px solid #e2e8f0">
+                <td style="padding:8px 14px;color:#64748b;font-size:13px;font-weight:600">Email</td>
+                <td style="padding:8px 14px;color:#0f172a;font-size:13px">${clientEmail}</td>
+              </tr>
+              <tr style="border-top:1px solid #e2e8f0">
+                <td style="padding:8px 14px;color:#64748b;font-size:13px;font-weight:600">Expires On</td>
+                <td style="padding:8px 14px;color:${urgencyColor};font-size:13px;font-weight:700">${expiryStr}</td>
+              </tr>
+            </table>
+            <div style="margin-top:24px;padding:16px 20px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe">
+              <div style="font-size:13px;font-weight:700;color:#1d4ed8;margin-bottom:6px">Action Required</div>
+              <div style="font-size:13px;color:#1e40af;line-height:1.6">
+                Please log in to the DriveInnovate dashboard and upgrade this account to a billable plan (3 months, 6 months, or 1 year) to continue uninterrupted access.
+              </div>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:16px 32px">
+            <div style="font-size:12px;color:#94a3b8">This is an automated notification from DriveInnovate Fleet Management. Please do not reply to this email.</div>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  try {
+    const transporter = getTransporter();
+    await transporter.sendMail({ from, to: recipients.join(', '), subject: `[Action Required] Trial account for ${clientName} expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`, html: htmlBody });
+    console.log(`[Email] Trial expiry warning sent to: ${recipients.join(', ')} | client: ${clientName}`);
+    return true;
+  } catch (err) {
+    console.error('[Email] Failed to send trial expiry warning:', err.message);
+    return false;
+  }
+}
+
+module.exports = { sendAlertEmail, buildAlertEmailHtml, getRecipients, sendTrialExpiryWarningEmail };

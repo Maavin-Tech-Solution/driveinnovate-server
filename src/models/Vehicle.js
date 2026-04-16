@@ -86,6 +86,11 @@ const Vehicle = sequelize.define(
       defaultValue: 5,
       comment: 'Minimum fuel % increase to count as a fill event',
     },
+    subscriptionExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      comment: 'Set when client upgrades to billable; null = no per-vehicle expiry tracked',
+    },
   },
   {
     tableName: 'di_user_vehicle',

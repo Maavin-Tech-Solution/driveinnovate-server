@@ -13,8 +13,11 @@ const SystemSetting = sequelize.define('SystemSetting', {
   /** Master switch — when false the Live Share feature is hidden for everyone */
   liveShareEnabled: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
 
-  // ── reserved for future feature flags ────────────────────────────────────
-  // tripShareEnabled: { type: DataTypes.BOOLEAN, defaultValue: true },
+  /** Master switch — enables trial account type with expiry enforcement */
+  trialAccountEnabled: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
+
+  /** How many days a newly created trial account is valid (default 30) */
+  trialDurationDays: { type: DataTypes.INTEGER, defaultValue: 30, allowNull: false },
 }, {
   tableName: 'system_settings',
   timestamps: true,

@@ -5,6 +5,7 @@ const nodemailer = require('nodemailer');
 const { Op, UniqueConstraintError } = require('sequelize');
 const { User, UserMeta, UserActivity, AuthOtp } = require('../models');
 const { getPermissions } = require('./permission.service');
+const { getSystemSettings } = require('./master.service');
 
 const OTP_EXPIRY_MINUTES = Number(process.env.OTP_EXPIRY_MINUTES || 10);
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || 5);
@@ -130,7 +131,7 @@ const getLatestActiveOtp = async ({ userId, email, purpose }) => {
   });
 };
 
-const register = async ({ name, email, password, phone, companyName, address, state, city, zip, country, businessCategory, gtin }) => {
+const register = async ({ name, email, password, phone, companyName, address, state, city, zip, country, businessCategory, gtin, accountType }) => {
   const existing = await User.findOne({ where: { email } });
   if (existing) {
     const err = new Error('Email is already registered');
@@ -140,9 +141,16 @@ const register = async ({ name, email, password, phone, companyName, address, st
 
   const hashedPassword = await bcrypt.hash(password, 12);
 
+  // Resolve trial expiry from system settings
+  const settings = await getSystemSettings();
+  const resolvedType = accountType || 'trial';
+  const trialExpiresAt = (resolvedType === 'trial' && settings.trialAccountEnabled)
+    ? new Date(Date.now() + settings.trialDurationDays * 24 * 60 * 60 * 1000)
+    : null;
+
   let user;
   try {
-    user = await User.create({ name, email, password: hashedPassword, phone });
+    user = await User.create({ name, email, password: hashedPassword, phone, accountType: resolvedType, trialExpiresAt });
   } catch (e) {
     if (e instanceof UniqueConstraintError) {
       const field = e.errors?.[0]?.path || 'email/phone';
@@ -184,6 +192,15 @@ const login = async ({ email, password, ipAddress, userAgent }) => {
   if (user.status !== 'active') {
     const err = new Error('Account is deactivated. Please contact support.');
     err.status = 403;
+    throw err;
+  }
+
+  // Trial expiry check (only when feature is enabled)
+  const loginSettings = await getSystemSettings();
+  if (loginSettings.trialAccountEnabled && user.accountType === 'trial' && user.trialExpiresAt && new Date() > user.trialExpiresAt) {
+    const err = new Error('Your trial account has expired. Please contact your dealer to upgrade.');
+    err.status = 403;
+    err.code = 'TRIAL_EXPIRED';
     throw err;
   }
 
@@ -303,6 +320,15 @@ const verifyLoginOtp = async ({ email, otp, ipAddress, userAgent }) => {
   }
 
   await otpRecord.update({ consumedAt: new Date() });
+
+  // Trial expiry check (only when feature is enabled)
+  const otpLoginSettings = await getSystemSettings();
+  if (otpLoginSettings.trialAccountEnabled && user.accountType === 'trial' && user.trialExpiresAt && new Date() > user.trialExpiresAt) {
+    const err = new Error('Your trial account has expired. Please contact your dealer to upgrade.');
+    err.status = 403;
+    err.code = 'TRIAL_EXPIRED';
+    throw err;
+  }
 
   await UserActivity.create({
     userId: user.id,

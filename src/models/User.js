@@ -35,6 +35,16 @@ const User = sequelize.define(
       type: DataTypes.STRING(50),
       defaultValue: 'active',
     },
+    accountType: {
+      type: DataTypes.ENUM('trial', 'billable', 'demo'),
+      defaultValue: 'trial',
+      allowNull: false,
+    },
+    trialExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      comment: 'When null on a trial account, no expiry is enforced',
+    },
   },
   {
     tableName: 'di_user',

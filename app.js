@@ -10,6 +10,7 @@ const { processPacket } = require('./src/services/packetProcessor.service');
 const { startAlertEngine } = require('./src/services/alertEngine.service');
 const { seedBuiltIns } = require('./src/services/master.service');
 const { runMigrations } = require('./src/config/migrate');
+const { startTrialExpiryJob } = require('./src/jobs/trialExpiryJob');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -103,6 +104,7 @@ sequelize
     app.listen(PORT, () => {
       console.log(`DriveInnovate Server running on port ${PORT}`);
       startAlertEngine();
+      startTrialExpiryJob();
     });
   })
   .catch((err) => {

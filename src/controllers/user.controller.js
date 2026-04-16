@@ -78,13 +78,18 @@ const createClient = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You do not have permission to add clients.' });
     }
 
-    const { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin } = req.body;
+    const { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType } = req.body;
     if (!name || !email || !phone || !password) {
       return res.status(400).json({ success: false, message: 'name, email, phone and password are required' });
     }
 
     if (String(password).length < 6) {
       return res.status(400).json({ success: false, message: 'password must be at least 6 characters' });
+    }
+
+    const VALID_TYPES = ['trial', 'billable', 'demo'];
+    if (accountType && !VALID_TYPES.includes(accountType)) {
+      return res.status(400).json({ success: false, message: 'accountType must be trial, billable or demo' });
     }
 
     const client = await userService.createClient(req.user.id, {
@@ -100,6 +105,7 @@ const createClient = async (req, res) => {
       country,
       businessCategory,
       gtin,
+      accountType,
     });
 
     return res.status(201).json({ success: true, message: 'Client created successfully', data: client });
@@ -149,4 +155,54 @@ const getClientTree = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree };
+/**
+ * POST /api/users/clients/:clientId/upgrade
+ * Upgrade a trial/demo account to billable.
+ * Body: { plan: '3months' | '6months' | '1year' }
+ * Papa and dealer only.
+ */
+const upgradeClient = async (req, res) => {
+  try {
+    const isPapa = Number(req.user.parentId) === 0;
+    const isDealer = req.user.role === 'dealer';
+    if (!isPapa && !isDealer) {
+      return res.status(403).json({ success: false, message: 'Only papa or dealer can upgrade accounts.' });
+    }
+    const clientId = Number(req.params.clientId);
+    const { plan } = req.body;
+    if (!plan) {
+      return res.status(400).json({ success: false, message: 'plan is required' });
+    }
+    const result = await userService.upgradeToBillable(clientId, req.user.clientIds, plan);
+    return res.json({ success: true, message: 'Account upgraded to billable', data: result });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * POST /api/users/clients/:clientId/extend-trial
+ * Extend the trial expiry date.
+ * Body: { newExpiresAt: ISO date string }
+ * Papa and dealer only.
+ */
+const extendClientTrial = async (req, res) => {
+  try {
+    const isPapa = Number(req.user.parentId) === 0;
+    const isDealer = req.user.role === 'dealer';
+    if (!isPapa && !isDealer) {
+      return res.status(403).json({ success: false, message: 'Only papa or dealer can extend trial.' });
+    }
+    const clientId = Number(req.params.clientId);
+    const { newExpiresAt } = req.body;
+    if (!newExpiresAt) {
+      return res.status(400).json({ success: false, message: 'newExpiresAt is required' });
+    }
+    const result = await userService.extendTrial(clientId, req.user.clientIds, newExpiresAt);
+    return res.json({ success: true, message: 'Trial extended', data: result });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree, upgradeClient, extendClientTrial };

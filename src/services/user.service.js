@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
-const { UniqueConstraintError, fn, col } = require('sequelize');
+const { UniqueConstraintError, fn, col, Op } = require('sequelize');
 const { sequelize, User, UserMeta, Vehicle } = require('../models');
+const { getSystemSettings } = require('./master.service');
 
 const getProfile = async (userId) => {
   const user = await User.findByPk(userId, { attributes: { exclude: ['password'] } });
@@ -56,7 +57,7 @@ const updateNotifications = async (userId, { emailNotifications, smsNotification
 
 const createClient = async (
   parentUserId,
-  { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin }
+  { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType }
 ) => {
   const existing = await User.findOne({ where: { email } });
   if (existing) {
@@ -67,6 +68,13 @@ const createClient = async (
 
   const hashedPassword = await bcrypt.hash(password, 12);
 
+  // Resolve trial expiry from system settings
+  const settings = await getSystemSettings();
+  const resolvedType = accountType || 'trial';
+  const trialExpiresAt = (resolvedType === 'trial' && settings.trialAccountEnabled)
+    ? new Date(Date.now() + settings.trialDurationDays * 24 * 60 * 60 * 1000)
+    : null;
+
   let user;
   try {
     user = await User.create({
@@ -75,6 +83,8 @@ const createClient = async (
       email,
       phone,
       password: hashedPassword,
+      accountType: resolvedType,
+      trialExpiresAt,
     });
   } catch (e) {
     if (e instanceof UniqueConstraintError) {
@@ -251,6 +261,86 @@ const buildClientTree = async (parentId, depth = 0) => {
   return result;
 };
 
+const PLAN_DAYS = { '3months': 90, '6months': 180, '1year': 365 };
+
+/**
+ * Upgrade a client account to billable.
+ * Sets accountType='billable' on the User and stamps subscriptionExpiresAt
+ * on every active vehicle owned by the client.
+ * @param {number}   clientId       — the user to upgrade
+ * @param {number[]} callerClientIds — must include clientId (access check)
+ * @param {'3months'|'6months'|'1year'} plan
+ */
+const upgradeToBillable = async (clientId, callerClientIds, plan) => {
+  if (!callerClientIds.includes(clientId)) {
+    const err = new Error('Access denied');
+    err.status = 403;
+    throw err;
+  }
+
+  const days = PLAN_DAYS[plan];
+  if (!days) {
+    const err = new Error('plan must be 3months, 6months or 1year');
+    err.status = 400;
+    throw err;
+  }
+
+  const client = await User.findByPk(clientId);
+  if (!client) {
+    const err = new Error('Client not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+  await client.update({ accountType: 'billable', trialExpiresAt: null });
+
+  await Vehicle.update(
+    { subscriptionExpiresAt: expiresAt },
+    { where: { clientId, status: { [Op.ne]: 'deleted' } } }
+  );
+
+  return { accountType: 'billable', subscriptionExpiresAt: expiresAt, plan };
+};
+
+/**
+ * Extend the trial period of a client account.
+ * @param {number}   clientId
+ * @param {number[]} callerClientIds
+ * @param {string}   newExpiresAt  — ISO date string
+ */
+const extendTrial = async (clientId, callerClientIds, newExpiresAt) => {
+  if (!callerClientIds.includes(clientId)) {
+    const err = new Error('Access denied');
+    err.status = 403;
+    throw err;
+  }
+
+  const expiry = new Date(newExpiresAt);
+  if (isNaN(expiry.getTime())) {
+    const err = new Error('Invalid date for newExpiresAt');
+    err.status = 400;
+    throw err;
+  }
+
+  const client = await User.findByPk(clientId);
+  if (!client) {
+    const err = new Error('Client not found');
+    err.status = 404;
+    throw err;
+  }
+
+  if (client.accountType !== 'trial') {
+    const err = new Error('Can only extend trial for trial accounts');
+    err.status = 400;
+    throw err;
+  }
+
+  await client.update({ trialExpiresAt: expiry });
+  return { accountType: 'trial', trialExpiresAt: expiry };
+};
+
 module.exports = {
   getProfile,
   updateProfile,
@@ -260,4 +350,6 @@ module.exports = {
   listClients,
   getClientDetail,
   buildClientTree,
+  upgradeToBillable,
+  extendTrial,
 };

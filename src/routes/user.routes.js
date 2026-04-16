@@ -27,4 +27,10 @@ router.get('/clients/:clientId', validateConsumer, userController.getClientDetai
 // POST /api/users/clients - create a client under current user
 router.post('/clients', validateConsumer, userController.createClient);
 
+// POST /api/users/clients/:clientId/upgrade - upgrade to billable (papa/dealer)
+router.post('/clients/:clientId/upgrade', validateConsumer, userController.upgradeClient);
+
+// POST /api/users/clients/:clientId/extend-trial - extend trial expiry (papa/dealer)
+router.post('/clients/:clientId/extend-trial', validateConsumer, userController.extendClientTrial);
+
 module.exports = router;
