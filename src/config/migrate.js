@@ -48,9 +48,11 @@ const MIGRATIONS = [
   // ── di_user_vehicle (per-vehicle subscription expiry) ────────────────────
   { table: 'di_user_vehicle', column: 'subscription_expires_at', ddl: 'DATETIME NULL COMMENT "Billable subscription expiry per vehicle"' },
 
-  // ── system_settings (trial feature flag + duration) ───────────────────────
-  { table: 'system_settings', column: 'trial_account_enabled', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Master switch for trial account expiry enforcement"' },
-  { table: 'system_settings', column: 'trial_duration_days',   ddl: 'INT NOT NULL DEFAULT 30 COMMENT "Default trial period in days for new accounts"' },
+  // ── system_settings (trial feature flag + duration) ──────────────────────
+  // NOTE: SystemSetting model has NO underscored:true, so Sequelize uses
+  // camelCase column names directly (trialAccountEnabled, trialDurationDays).
+  { table: 'system_settings', column: 'trialAccountEnabled', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Master switch for trial account expiry enforcement"' },
+  { table: 'system_settings', column: 'trialDurationDays',   ddl: 'INT NOT NULL DEFAULT 30 COMMENT "Default trial period in days for new accounts"' },
 ];
 
 /**
