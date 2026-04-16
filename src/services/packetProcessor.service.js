@@ -150,7 +150,7 @@ function resolveIgnition(pkt, caps, prevEngineOn) {
  * @param {object} doc        Raw MongoDB document from any device collection
  * @param {string} deviceType e.g. 'GT06', 'FMB125', 'FMB920', 'AIS140'
  */
-async function processPacket(doc, deviceType) {
+async function processPacket(doc, deviceType, { skipLockCheck = false } = {}) {
   try {
     if (!doc?.imei) {
       console.warn(`[PacketProcessor:${deviceType}] Packet missing IMEI, skipping`);
@@ -169,7 +169,7 @@ async function processPacket(doc, deviceType) {
       return;
     }
     const vehicleId = vehicle.id;
-    if (reprocessingVehicles.has(vehicleId)) return;
+    if (!skipLockCheck && reprocessingVehicles.has(vehicleId)) return;
 
     const idleThresholdMs   = (vehicle.idleThreshold  || 5) * 60 * 1000;
     const fuelFillThreshold = vehicle.fuelFillThreshold || 5;
@@ -633,7 +633,7 @@ async function reprocessVehicle(vehicleId, from, to) {
         .sort({ timestamp: 1 });
 
       for await (const rawDoc of cursor) {
-        await processPacket(rawDoc, deviceType);
+        await processPacket(rawDoc, deviceType, { skipLockCheck: true });
         processed++;
       }
     }
