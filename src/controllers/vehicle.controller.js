@@ -109,7 +109,7 @@ const deleteVehicle = async (req, res) => {
  */
 const syncVehicleData = async (req, res) => {
   try {
-    const data = await vehicleService.syncVehicleData(req.params.id, req.user.id);
+    const data = await vehicleService.syncVehicleData(req.params.id, req.user.clientIds);
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

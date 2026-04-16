@@ -821,14 +821,21 @@ const deleteVehicle = async (id, clientId) => {
   return { message: 'Vehicle deleted successfully' };
 };
 
-const syncVehicleData = async (id, clientId) => {
-  // Fetch vehicle from MySQL
+const syncVehicleData = async (id, callerClientIds) => {
+  // Find vehicle by id, then verify the caller has access to its owner
   const vehicle = await Vehicle.findOne({
-    where: { id, clientId },
+    where: { id },
     include: [{ model: RtoDetail, as: 'rtoDetail' }],
   });
 
   if (!vehicle) {
+    const err = new Error('Vehicle not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const allowedIds = Array.isArray(callerClientIds) ? callerClientIds : [callerClientIds];
+  if (!allowedIds.includes(vehicle.clientId)) {
     const err = new Error('Vehicle not found');
     err.status = 404;
     throw err;
