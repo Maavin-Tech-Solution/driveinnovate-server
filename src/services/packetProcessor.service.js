@@ -306,4 +306,74 @@ async function processPacket(doc, deviceType) {
   }
 }
 
-module.exports = { processPacket, invalidateVehicleCache };
+// ── Startup reconciliation ────────────────────────────────────────────────────
+/**
+ * Close any in_progress trips that the state machine is no longer tracking.
+ *
+ * This handles the case where the server (or change stream) was down when the
+ * ignition-off packet arrived — the trip stays in_progress in MySQL forever
+ * because processPacket was never called for that packet.
+ *
+ * Rules applied on startup:
+ *   A) VehicleDeviceState.currentTripId === null but a trip with that vehicle
+ *      is still in_progress  →  the state machine has already moved on; close
+ *      the trip using trip.endTime (continuously updated while engine was ON).
+ *
+ *   B) VehicleDeviceState.currentTripId === trip.id but engineOn === false
+ *      →  engine is off, state pointer wasn't cleared; close trip + clear pointer.
+ *
+ *   C) No VehicleDeviceState row at all for a vehicle that has an in_progress trip
+ *      →  orphaned; close the trip.
+ */
+async function reconcileStaleTrips() {
+  const { Op } = require('sequelize');
+  try {
+    const staleTrips = await Trip.findAll({
+      where: { status: 'in_progress' },
+      attributes: ['id', 'vehicleId', 'startTime', 'endTime'],
+    });
+
+    if (!staleTrips.length) {
+      console.log('[Reconcile] No in_progress trips found — nothing to do');
+      return;
+    }
+
+    console.log(`[Reconcile] Found ${staleTrips.length} in_progress trip(s) — checking states…`);
+    let closed = 0;
+
+    for (const trip of staleTrips) {
+      const state = await VehicleDeviceState.findOne({ where: { vehicleId: trip.vehicleId } });
+
+      const shouldClose =
+        !state ||                                       // C: no state row
+        state.currentTripId !== trip.id ||             // A: state no longer references this trip
+        (state.currentTripId === trip.id && !state.engineOn); // B: still referenced but engine OFF
+
+      if (!shouldClose) continue;
+
+      // Use the trip's own endTime (updated live while engine was ON) as the end time.
+      // Fall back to state.lastPacketTime, then now.
+      const endTime = trip.endTime || state?.lastPacketTime || new Date();
+      const durationSec = Math.max(
+        0,
+        Math.floor((new Date(endTime).getTime() - new Date(trip.startTime).getTime()) / 1000)
+      );
+
+      await trip.update({ status: 'completed', endTime, duration: durationSec });
+
+      // Clear the dangling pointer in device state if it still points here
+      if (state?.currentTripId === trip.id) {
+        await state.update({ currentTripId: null });
+      }
+
+      console.log(`[Reconcile] Closed stale trip #${trip.id} (vehicle ${trip.vehicleId}, ${durationSec}s)`);
+      closed++;
+    }
+
+    console.log(`[Reconcile] Done — closed ${closed} stale trip(s)`);
+  } catch (err) {
+    console.error('[Reconcile] Error during stale-trip reconciliation:', err.message);
+  }
+}
+
+module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips };
