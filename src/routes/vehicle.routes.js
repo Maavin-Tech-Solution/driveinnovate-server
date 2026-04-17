@@ -3,6 +3,7 @@ const router = express.Router();
 const vehicleController = require('../controllers/vehicle.controller');
 const sensorController = require('../controllers/sensor.controller');
 const vehicleReportController = require('../controllers/vehicleReport.controller');
+const customFieldController = require('../controllers/customField.controller');
 const validateConsumer = require('../middleware/validateConsumer');
 
 // GET /api/vehicles - list all vehicles for user
@@ -47,6 +48,12 @@ router.get('/:id/reports/fuel-fillings', validateConsumer, vehicleReportControll
 router.get('/:id/reports/export',        validateConsumer, vehicleReportController.exportReport);
 router.get('/:id/reports/export-xlsx',   validateConsumer, vehicleReportController.exportExcel);
 router.get('/:id/reports/raw-packets',   validateConsumer, vehicleReportController.getRawPackets);
+
+// Custom Fields CRUD
+router.get('/:id/custom-fields', validateConsumer, customFieldController.getCustomFields);
+router.post('/:id/custom-fields', validateConsumer, customFieldController.createCustomField);
+router.put('/:id/custom-fields/:fieldId', validateConsumer, customFieldController.updateCustomField);
+router.delete('/:id/custom-fields/:fieldId', validateConsumer, customFieldController.deleteCustomField);
 
 // Reprocess — PAPA only: replay all MongoDB packets through trip state machine
 router.post('/:id/reprocess', validateConsumer, vehicleReportController.reprocess);

@@ -27,6 +27,7 @@ const UserPermission = require('./UserPermission');
 const DeviceConfig = require('./DeviceConfig');
 const StateDefinition = require('./StateDefinition');
 const SystemSetting = require('./SystemSetting');
+const VehicleCustomField = require('./VehicleCustomField');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -110,6 +111,10 @@ Vehicle.hasMany(GeofenceAssignment, { foreignKey: 'vehicleId', as: 'geofenceAssi
 GeofenceAssignment.belongsTo(VehicleGroup, { foreignKey: 'groupId', as: 'group' });
 VehicleGroup.hasMany(GeofenceAssignment, { foreignKey: 'groupId', as: 'geofenceAssignments' });
 
+// Vehicle Custom Fields
+Vehicle.hasMany(VehicleCustomField, { foreignKey: 'vehicleId', as: 'customFields' });
+VehicleCustomField.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
 // Device Configs & State Definitions
 DeviceConfig.hasMany(StateDefinition, { foreignKey: 'deviceConfigId', as: 'states' });
 StateDefinition.belongsTo(DeviceConfig, { foreignKey: 'deviceConfigId', as: 'deviceConfig' });
@@ -161,4 +166,5 @@ module.exports = {
   DeviceConfig,
   StateDefinition,
   SystemSetting,
+  VehicleCustomField,
 };

@@ -1,14 +1,19 @@
 /**
  * PacketProcessor — real-time trip detection.
  *
- * Trip rules (v2 — robust against GT06 STATUS packet noise):
+ * Trip rules (v3 — handles GT06 STATUS noise + AIS140 always-ON ignition):
  *   GATE    : only GPS-bearing packets participate in trip/engine decisions.
  *             STATUS (0x13), HEARTBEAT (0x23), and GPS-unfixed LOCATION packets
  *             use a different ACC register that conflicts with LOCATION's ACC,
  *             causing false ignition toggles that shatter trips into fragments.
  *   START   : ignition ON  AND  speed > TRIP_START_SPEED km/h
  *   UPDATE  : every GPS packet while ignition ON and trip is active
- *   END     : ignition OFF confirmed for IGNITION_OFF_CONFIRM_MS (debounce)
+ *   END     : (a) ignition OFF confirmed for IGNITION_OFF_CONFIRM_MS (debounce)
+ *             (b) speed < DRIVE_SPEED_THRESH for TRIP_IDLE_CLOSE_MS (idle close)
+ *             (c) GPS gap > TRIP_GPS_GAP_MS (no GPS packets received)
+ *
+ * The idle-close rule (b) handles devices like AIS140 where ignition is always
+ * reported as ON.  Without it, trips stay open forever during parking.
  *
  * Engine session rules:
  *   Same GPS-only gate.  START on ignition ON, END on confirmed ignition OFF.
@@ -36,6 +41,7 @@ const TRIP_START_SPEED         = 5;     // km/h — must exceed to open a new tr
 const ROUTE_SAMPLE_SECS        = 30;    // append a route point at most every 30 s
 const DRIVE_SPEED_THRESH       = 2;     // km/h — above this counts as "driving"
 const IGNITION_OFF_CONFIRM_MS  = 30_000; // 30 s debounce before closing a trip
+const TRIP_IDLE_CLOSE_MS       = 5 * 60_000; // 5 min — close trip if speed stays below DRIVE_SPEED_THRESH
 const MAX_JUMP_KPH             = 200;   // GPS positions implying faster than this are noise
 const TRIP_GPS_GAP_MS          = 5 * 60_000; // 5 min — auto-close trip if no GPS packet for this long
 const MIN_TRIP_DURATION_SEC    = 30;    // trips shorter than this are noise (deleted in reprocess cleanup)
@@ -119,22 +125,32 @@ function isGpsJump(prevLat, prevLng, prevTimeMs, newLat, newLng, newTimeMs) {
 }
 
 // ── Main processor ────────────────────────────────────────────────────────────
-async function processPacket(doc, deviceType) {
+/**
+ * @param {object}  doc        Raw MongoDB document
+ * @param {string}  deviceType e.g. 'GT06', 'AIS140'
+ * @param {object} [_state]    Optional in-memory Sequelize state instance.
+ *                             When provided, skips the MySQL read (used by
+ *                             reprocessVehicle to avoid state corruption from
+ *                             concurrent live-packet processing).
+ * @returns {object|undefined} The state instance (when _state was provided)
+ */
+async function processPacket(doc, deviceType, _state) {
   try {
-    if (!doc?.imei) return;
+    if (!doc?.imei) return _state;
 
     const pkt  = normalizePacket(doc, deviceType);
     const caps = getCapabilities(deviceType);
 
     const vehicle = await getVehicle(pkt.imei);
-    if (!vehicle) return;
+    if (!vehicle) return _state;
 
     const vehicleId          = vehicle.id;
     const fuelFillThreshold  = vehicle.fuelFillThreshold || 5;
     const now                = pkt.timestamp.getTime();
 
     // ── Get or create live device state ───────────────────────────────────────
-    let state = await VehicleDeviceState.findOne({ where: { vehicleId } });
+    // During reprocess, _state is passed in-memory to avoid MySQL read per packet.
+    let state = _state || await VehicleDeviceState.findOne({ where: { vehicleId } });
     if (!state) state = await VehicleDeviceState.create({ vehicleId, imei: pkt.imei });
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -161,7 +177,7 @@ async function processPacket(doc, deviceType) {
       if (pkt.gsmSignal  != null) state.lastGsmSignal        = pkt.gsmSignal;
       if (pkt.externalVoltage != null) state.lastExternalVoltage = pkt.externalVoltage;
       await state.save();
-      return;
+      return _state ? state : undefined;
     }
 
     // ── From here on, packet has valid GPS coordinates ────────────────────────
@@ -363,44 +379,80 @@ async function processPacket(doc, deviceType) {
 
     } else if (ignitionOn && state.currentTripId) {
       // ── Trip active, ignition still ON — accumulate stats ───────────────────
-      state.engineOffSince = null; // ignition back ON → cancel any pending close
+      const isDriving = speed >= DRIVE_SPEED_THRESH;
 
-      const trip = await Trip.findByPk(state.currentTripId);
-      if (trip && trip.status === 'in_progress') {
-        const segKm      = jumped ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
-        const newDist    = parseFloat(trip.distance || 0) + segKm;
-        const newMax     = Math.max(parseFloat(trip.maxSpeed || 0), speed);
-        const durationSec = Math.max(0, Math.floor((now - new Date(trip.startTime).getTime()) / 1000));
-        const isDriving  = speed >= DRIVE_SPEED_THRESH;
-        const segSecs    = state.lastGpsPacketTime && pkt.lat
-          ? Math.max(0, Math.floor((now - new Date(state.lastGpsPacketTime).getTime()) / 1000)) : 0;
-
-        // Build route (sample every ROUTE_SAMPLE_SECS)
-        let route   = trip.routeData || [];
-        const lastPt = route[route.length - 1];
-        if (pkt.lat && !jumped && (!lastPt || (now - new Date(lastPt.ts).getTime()) / 1000 >= ROUTE_SAMPLE_SECS)) {
-          route = [...route, { lat: pkt.lat, lng: pkt.lng, ts: pkt.timestamp.toISOString(), spd: speed }];
-          if (route.length > 2000) route = route.slice(-2000);
+      // Speed-based idle close: if vehicle has been below driving threshold for
+      // TRIP_IDLE_CLOSE_MS, close the trip even though ignition is still ON.
+      // This handles AIS140 and similar devices where ignition is always reported
+      // as ON.  Re-uses engineOffSince to track idle start (since ignition-OFF
+      // never fires for these devices, the field is available).
+      if (!isDriving) {
+        if (!state.engineOffSince) state.engineOffSince = pkt.timestamp;
+        const idleMs = now - new Date(state.engineOffSince).getTime();
+        if (idleMs >= TRIP_IDLE_CLOSE_MS) {
+          // Vehicle idle for too long — close the trip at the moment speed first dropped
+          const trip = await Trip.findByPk(state.currentTripId);
+          if (trip && trip.status === 'in_progress') {
+            const realEndTime = new Date(state.engineOffSince);
+            const durationSec = Math.max(0, Math.floor(
+              (realEndTime.getTime() - new Date(trip.startTime).getTime()) / 1000
+            ));
+            await trip.update({
+              status: 'completed', endTime: realEndTime, duration: durationSec,
+              endLatitude: pkt.lat || trip.endLatitude,
+              endLongitude: pkt.lng || trip.endLongitude,
+              odometerEnd: pkt.odometer != null ? pkt.odometer : trip.odometerEnd,
+            });
+            console.log(`[PP] Trip #${trip.id} IDLE-CLOSED for vehicle ${vehicleId} (${durationSec}s, ${trip.distance} km)`);
+          }
+          state.currentTripId = null;
+          state.engineOffSince = null;
+          // Don't start a new trip on this packet (speed is low)
         }
+        // else: still within idle window — keep trip open, continue below
+      } else {
+        // Vehicle is driving — clear any idle timer
+        state.engineOffSince = null;
+      }
 
-        const movingPts = route.filter(p => p.spd >= DRIVE_SPEED_THRESH);
-        const avgSpeed  = movingPts.length
-          ? movingPts.reduce((s, p) => s + p.spd, 0) / movingPts.length : 0;
+      // Update trip stats if trip is still active
+      if (state.currentTripId) {
+        const trip = await Trip.findByPk(state.currentTripId);
+        if (trip && trip.status === 'in_progress') {
+          const segKm      = jumped ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
+          const newDist    = parseFloat(trip.distance || 0) + segKm;
+          const newMax     = Math.max(parseFloat(trip.maxSpeed || 0), speed);
+          const durationSec = Math.max(0, Math.floor((now - new Date(trip.startTime).getTime()) / 1000));
+          const segSecs    = state.lastGpsPacketTime && pkt.lat
+            ? Math.max(0, Math.floor((now - new Date(state.lastGpsPacketTime).getTime()) / 1000)) : 0;
 
-        await trip.update({
-          endTime:            pkt.timestamp,
-          duration:           durationSec,
-          distance:           newDist,
-          maxSpeed:           newMax,
-          avgSpeed:           Math.round(avgSpeed * 100) / 100,
-          endLatitude:        pkt.lat || trip.endLatitude,
-          endLongitude:       pkt.lng || trip.endLongitude,
-          routeData:          route,
-          odometerEnd:        pkt.odometer != null ? pkt.odometer : trip.odometerEnd,
-          drivingTimeSeconds: (trip.drivingTimeSeconds || 0) + (isDriving ? segSecs : 0),
-          engineIdleSeconds:  (trip.engineIdleSeconds  || 0) + (isDriving ? 0 : segSecs),
-          idleTime:           (trip.idleTime           || 0) + (isDriving ? 0 : segSecs),
-        });
+          // Build route (sample every ROUTE_SAMPLE_SECS)
+          let route   = trip.routeData || [];
+          const lastPt = route[route.length - 1];
+          if (pkt.lat && !jumped && (!lastPt || (now - new Date(lastPt.ts).getTime()) / 1000 >= ROUTE_SAMPLE_SECS)) {
+            route = [...route, { lat: pkt.lat, lng: pkt.lng, ts: pkt.timestamp.toISOString(), spd: speed }];
+            if (route.length > 2000) route = route.slice(-2000);
+          }
+
+          const movingPts = route.filter(p => p.spd >= DRIVE_SPEED_THRESH);
+          const avgSpeed  = movingPts.length
+            ? movingPts.reduce((s, p) => s + p.spd, 0) / movingPts.length : 0;
+
+          await trip.update({
+            endTime:            pkt.timestamp,
+            duration:           durationSec,
+            distance:           newDist,
+            maxSpeed:           newMax,
+            avgSpeed:           Math.round(avgSpeed * 100) / 100,
+            endLatitude:        pkt.lat || trip.endLatitude,
+            endLongitude:       pkt.lng || trip.endLongitude,
+            routeData:          route,
+            odometerEnd:        pkt.odometer != null ? pkt.odometer : trip.odometerEnd,
+            drivingTimeSeconds: (trip.drivingTimeSeconds || 0) + (isDriving ? segSecs : 0),
+            engineIdleSeconds:  (trip.engineIdleSeconds  || 0) + (isDriving ? 0 : segSecs),
+            idleTime:           (trip.idleTime           || 0) + (isDriving ? 0 : segSecs),
+          });
+        }
       }
 
     } else if (ignitionOn && !state.currentTripId) {
@@ -428,6 +480,7 @@ async function processPacket(doc, deviceType) {
     state.currentSessionId  = state.currentSessionId || null;
     state.pendingTripEnd    = false;
     await state.save();
+    return _state ? state : undefined;
 
   } catch (err) {
     if (err.name === 'SequelizeForeignKeyConstraintError' && doc?.imei) {
@@ -436,6 +489,7 @@ async function processPacket(doc, deviceType) {
     } else {
       console.error('[PP] Error processing packet:', err.message);
     }
+    return _state ? _state : undefined;
   }
 }
 
@@ -673,10 +727,16 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
     : ' [ALL]';
   console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packets.length} packets in ${caps.mongoCollection}${rangeLabel}`);
 
-  // ── 3. Replay through processPacket ─────────────────────────────────────────
+  // ── 3. Replay through processPacket (in-memory state) ───────────────────────
+  // Pass the state instance through each processPacket call so it is read/written
+  // in memory instead of MySQL.  This avoids two bugs:
+  //   a) ~12k MySQL reads per reprocess (slow)
+  //   b) Concurrent live-packet processing overwriting state between reads,
+  //      causing false GPS-gap detections and trip fragmentation.
+  let inMemState = state || await VehicleDeviceState.findOne({ where: { vehicleId } });
   let processed = 0;
   for (const pkt of packets) {
-    await processPacket(pkt, vehicle.deviceType);
+    inMemState = await processPacket(pkt, vehicle.deviceType, inMemState) || inMemState;
     processed++;
     if (processed % 500 === 0) {
       console.log(`[Reprocess] Vehicle ${vehicleId}: ${processed}/${packets.length}…`);

@@ -150,7 +150,7 @@ const register = async ({ name, email, password, phone, companyName, address, st
 
   let user;
   try {
-    user = await User.create({ name, email, password: hashedPassword, phone, accountType: resolvedType, trialExpiresAt });
+    user = await User.create({ name, email, password: hashedPassword, phone, accountType: resolvedType, trialExpiresAt, parentId: 5 });
   } catch (e) {
     if (e instanceof UniqueConstraintError) {
       const field = e.errors?.[0]?.path || 'email/phone';
