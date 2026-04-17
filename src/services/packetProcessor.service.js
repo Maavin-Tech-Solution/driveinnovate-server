@@ -23,6 +23,7 @@ const {
 } = require('../models');
 const { normalizePacket }  = require('./packetNormalizer.service');
 const { getCapabilities }  = require('../config/deviceCapabilities');
+const { getMongoDb }       = require('../config/mongodb');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const TRIP_START_SPEED    = 5;   // km/h — must exceed to open a new trip
@@ -401,4 +402,91 @@ async function reconcileStaleTrips() {
   }
 }
 
-module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips };
+// ── Startup catch-up ──────────────────────────────────────────────────────────
+/**
+ * Process any MongoDB packets that arrived while the server was down.
+ *
+ * Change streams only deliver NEW inserts from the moment they start.
+ * On Render free tier the server spins down after 15 min of inactivity,
+ * so packets can pile up in MongoDB unprocessed for hours.
+ *
+ * For each vehicle we look up its VehicleDeviceState.lastPacketTime and replay
+ * every MongoDB packet newer than that timestamp (capped at CATCHUP_LOOKBACK_MS).
+ * Packets are fed through processPacket in chronological order so the state
+ * machine behaves identically to the real-time path.
+ *
+ * Runs non-blocking in the background — the server is already accepting requests.
+ */
+const CATCHUP_LOOKBACK_MS = 48 * 60 * 60 * 1000; // look back up to 48 hours
+const CATCHUP_BATCH_LIMIT = 5000;                  // max packets per vehicle per run
+
+async function catchUpMissedPackets() {
+  const { Op } = require('sequelize');
+  const mongoDb = getMongoDb();
+  if (!mongoDb) {
+    console.log('[CatchUp] MongoDB not connected — skipping');
+    return;
+  }
+
+  let vehicles;
+  try {
+    vehicles = await Vehicle.findAll({
+      where: { imei: { [Op.ne]: null }, status: { [Op.ne]: 'deleted' } },
+      attributes: ['id', 'imei', 'deviceType'],
+    });
+  } catch (err) {
+    console.error('[CatchUp] Could not load vehicles from MySQL:', err.message);
+    return;
+  }
+
+  const cutoff = new Date(Date.now() - CATCHUP_LOOKBACK_MS);
+  let totalVehicles = 0;
+  let totalPackets  = 0;
+
+  for (const vehicle of vehicles) {
+    try {
+      // Find from-date: resume from lastPacketTime or fall back to 48-h cutoff
+      const state = await VehicleDeviceState.findOne({ where: { vehicleId: vehicle.id } });
+      const lastSeen = state?.lastPacketTime ? new Date(state.lastPacketTime) : null;
+      const fromDate = lastSeen && lastSeen > cutoff ? lastSeen : cutoff;
+
+      const caps = getCapabilities(vehicle.deviceType);
+
+      // Try both with and without leading zero (device may send either form)
+      const imeiVariants = [vehicle.imei];
+      if (vehicle.imei.startsWith('0')) imeiVariants.push(vehicle.imei.slice(1));
+      else imeiVariants.push('0' + vehicle.imei);
+
+      const packets = await mongoDb
+        .collection(caps.mongoCollection)
+        .find({ imei: { $in: imeiVariants }, timestamp: { $gt: fromDate } })
+        .sort({ timestamp: 1 })
+        .limit(CATCHUP_BATCH_LIMIT)
+        .toArray();
+
+      if (!packets.length) continue;
+
+      console.log(
+        `[CatchUp] vehicle ${vehicle.id} (${vehicle.imei}): ` +
+        `${packets.length} missed packet(s) since ${fromDate.toISOString()}`
+      );
+
+      for (const packet of packets) {
+        await processPacket(packet, vehicle.deviceType);
+      }
+
+      totalVehicles++;
+      totalPackets += packets.length;
+    } catch (err) {
+      console.warn(`[CatchUp] vehicle ${vehicle.id} error:`, err.message);
+    }
+  }
+
+  if (totalPackets > 0) {
+    console.log(`[CatchUp] Done — processed ${totalPackets} missed packet(s) for ${totalVehicles} vehicle(s)`);
+  } else {
+    console.log('[CatchUp] No missed packets found');
+  }
+}
+
+module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips, catchUpMissedPackets };

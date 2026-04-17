@@ -6,7 +6,7 @@ const { sequelize } = require('./src/models');
 const routes = require('./src/routes');
 const mongoose = require('mongoose');
 const { connectMongoDB, getMongoDb } = require('./src/config/mongodb');
-const { processPacket, reconcileStaleTrips } = require('./src/services/packetProcessor.service');
+const { processPacket, reconcileStaleTrips, catchUpMissedPackets } = require('./src/services/packetProcessor.service');
 const { startAlertEngine } = require('./src/services/alertEngine.service');
 const { seedBuiltIns } = require('./src/services/master.service');
 const { runMigrations } = require('./src/config/migrate');
@@ -93,7 +93,12 @@ sequelize
     return connectMongoDB()
       .then(() => {
         console.log('✓ MongoDB connected - GPS tracking enabled');
-        return startChangeStreams(); // async — returns promise; drives collection list from DeviceConfig
+        // Start real-time change streams, then catch up any missed packets in background
+        return startChangeStreams().then(() => {
+          catchUpMissedPackets().catch(err =>
+            console.error('[CatchUp] Unhandled error:', err.message)
+          );
+        });
       })
       .catch((err) => {
         console.error('✖ MongoDB connection failed:', err.message);
