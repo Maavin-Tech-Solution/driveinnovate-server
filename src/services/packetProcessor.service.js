@@ -491,4 +491,80 @@ async function catchUpMissedPackets() {
   }
 }
 
-module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips, catchUpMissedPackets };
+// ── On-demand reprocess (PAPA only) ──────────────────────────────────────────
+/**
+ * Reprocess ALL MongoDB packets for a vehicle from scratch.
+ *
+ * 1. Deletes all existing trips, engine sessions, and fuel events for the vehicle.
+ * 2. Resets VehicleDeviceState so the state machine starts clean.
+ * 3. Replays every MongoDB packet through processPacket in chronological order.
+ *
+ * This is an admin action (PAPA accounts only) meant to rebuild trip history
+ * when the real-time change stream missed packets (e.g. server was down).
+ */
+async function reprocessVehicle(vehicleId) {
+  const { Op } = require('sequelize');
+
+  const vehicle = await Vehicle.findByPk(vehicleId, {
+    attributes: ['id', 'imei', 'deviceType'],
+  });
+  if (!vehicle || !vehicle.imei) {
+    throw Object.assign(new Error('Vehicle not found or has no IMEI'), { status: 404 });
+  }
+
+  let mongoDb;
+  try { mongoDb = getMongoDb(); } catch (e) {
+    throw Object.assign(new Error('MongoDB not connected'), { status: 503 });
+  }
+
+  const caps = getCapabilities(vehicle.deviceType);
+  const imeiVariants = [vehicle.imei];
+  if (vehicle.imei.startsWith('0')) imeiVariants.push(vehicle.imei.slice(1));
+  else imeiVariants.push('0' + vehicle.imei);
+
+  // ── 1. Wipe existing computed data ──────────────────────────────────────────
+  await Trip.destroy({ where: { vehicleId } });
+  await VehicleEngineSession.destroy({ where: { vehicleId } });
+  await VehicleFuelEvent.destroy({ where: { vehicleId } });
+
+  const state = await VehicleDeviceState.findOne({ where: { vehicleId } });
+  if (state) {
+    await state.update({
+      currentTripId: null,
+      currentSessionId: null,
+      engineOn: false,
+      engineOnSince: null,
+      pendingTripEnd: false,
+      lastFuelLevel: null,
+    });
+  }
+
+  // Invalidate vehicle cache so processPacket re-reads from DB
+  invalidateVehicleCache(vehicle.imei);
+
+  // ── 2. Fetch all packets from MongoDB ───────────────────────────────────────
+  const packets = await mongoDb
+    .collection(caps.mongoCollection)
+    .find({ imei: { $in: imeiVariants } })
+    .sort({ timestamp: 1 })
+    .toArray();
+
+  console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packets.length} packets in ${caps.mongoCollection}`);
+
+  // ── 3. Replay through processPacket ─────────────────────────────────────────
+  let processed = 0;
+  for (const pkt of packets) {
+    await processPacket(pkt, vehicle.deviceType);
+    processed++;
+    if (processed % 500 === 0) {
+      console.log(`[Reprocess] Vehicle ${vehicleId}: ${processed}/${packets.length}…`);
+    }
+  }
+
+  const tripCount = await Trip.count({ where: { vehicleId } });
+  console.log(`[Reprocess] Vehicle ${vehicleId} done — ${processed} packets → ${tripCount} trips`);
+
+  return { processed, tripsCreated: tripCount };
+}
+
+module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips, catchUpMissedPackets, reprocessVehicle };

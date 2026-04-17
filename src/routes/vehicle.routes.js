@@ -48,4 +48,7 @@ router.get('/:id/reports/export',        validateConsumer, vehicleReportControll
 router.get('/:id/reports/export-xlsx',   validateConsumer, vehicleReportController.exportExcel);
 router.get('/:id/reports/raw-packets',   validateConsumer, vehicleReportController.getRawPackets);
 
+// Reprocess — PAPA only: replay all MongoDB packets through trip state machine
+router.post('/:id/reprocess', validateConsumer, vehicleReportController.reprocess);
+
 module.exports = router;

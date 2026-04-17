@@ -1,4 +1,5 @@
 const vehicleReportService = require('../services/vehicleReport.service');
+const { reprocessVehicle } = require('../services/packetProcessor.service');
 
 /**
  * Parse a date/datetime string as IST and return the corresponding UTC Date.
@@ -297,6 +298,22 @@ exports.getRawPackets = async (req, res) => {
     res.send(rows.join('\r\n'));
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * POST /api/vehicles/:id/reprocess
+ * PAPA only — reprocess all MongoDB packets for a vehicle from scratch.
+ */
+exports.reprocess = async (req, res) => {
+  try {
+    if (req.user.role !== 'papa') {
+      return res.status(403).json({ success: false, message: 'Only papa accounts can reprocess vehicles' });
+    }
+    const result = await reprocessVehicle(Number(req.params.id));
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
   }
 };
 
