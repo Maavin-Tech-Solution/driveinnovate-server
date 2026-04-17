@@ -37,6 +37,7 @@ const ROUTE_SAMPLE_SECS        = 30;    // append a route point at most every 30
 const DRIVE_SPEED_THRESH       = 2;     // km/h — above this counts as "driving"
 const IGNITION_OFF_CONFIRM_MS  = 30_000; // 30 s debounce before closing a trip
 const MAX_JUMP_KPH             = 200;   // GPS positions implying faster than this are noise
+const TRIP_GPS_GAP_MS          = 5 * 60_000; // 5 min — auto-close trip if no GPS packet for this long
 const MIN_TRIP_DURATION_SEC    = 30;    // trips shorter than this are noise (deleted in reprocess cleanup)
 const MIN_TRIP_DISTANCE_KM     = 0.05;  // trips shorter than 50 m are noise
 
@@ -164,6 +165,48 @@ async function processPacket(doc, deviceType) {
     }
 
     // ── From here on, packet has valid GPS coordinates ────────────────────────
+
+    // ── GPS gap timeout ──────────────────────────────────────────────────────
+    // When the car parks, the GT06 stops sending GPS-fixed LOCATION packets
+    // and only sends STATUS/HEARTBEAT (which are skipped above).  Without
+    // this check the trip would stay open indefinitely.
+    //
+    // If the gap between the last GPS packet and this one exceeds 5 minutes,
+    // auto-close any active trip/session at the last-known GPS time.
+    if (state.currentTripId && state.lastGpsPacketTime) {
+      const gapMs = now - new Date(state.lastGpsPacketTime).getTime();
+      if (gapMs > TRIP_GPS_GAP_MS) {
+        const trip = await Trip.findByPk(state.currentTripId);
+        if (trip && trip.status === 'in_progress') {
+          const gapEndTime = new Date(state.lastGpsPacketTime);
+          const dur = Math.max(0, Math.floor(
+            (gapEndTime.getTime() - new Date(trip.startTime).getTime()) / 1000
+          ));
+          await trip.update({
+            status: 'completed', endTime: gapEndTime, duration: dur,
+            endLatitude: state.lastLat || trip.endLatitude,
+            endLongitude: state.lastLng || trip.endLongitude,
+          });
+          console.log(`[PP] Trip #${trip.id} AUTO-CLOSED (GPS gap ${(gapMs/60000).toFixed(1)} min) vid=${vehicleId}`);
+        }
+        state.currentTripId = null;
+        state.engineOffSince = null;
+        // Also close any active engine session
+        if (state.currentSessionId) {
+          const sess = await VehicleEngineSession.findByPk(state.currentSessionId);
+          if (sess && sess.status === 'active') {
+            const dur = Math.max(0, Math.floor(
+              (new Date(state.lastGpsPacketTime).getTime() - new Date(sess.startTime).getTime()) / 1000
+            ));
+            await sess.update({ endTime: new Date(state.lastGpsPacketTime), durationSeconds: dur, status: 'completed' });
+          }
+          state.currentSessionId = null;
+        }
+        state.engineOn = false; // reset so downstream logic sees a clean state
+      }
+    }
+
+    // Derive ignition AFTER gap check so prevIgnition reflects any gap closure
     const prevIgnition = state.engineOn || false;
     const ignitionOn   = resolveIgnition(pkt, caps, prevIgnition);
     const speed        = pkt.speed || 0;
