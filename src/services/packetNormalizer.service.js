@@ -73,7 +73,11 @@ const { getCapabilities } = require('../config/deviceCapabilities');
 const GT06_TZ_OFFSET_MS = parseInt(process.env.GT06_TZ_OFFSET_MIN || '0', 10) * 60_000;
 
 function normalizeGT06(doc) {
-  const lat = parseFloat(doc.latitude) || null;
+  // GT06 N/S hemisphere bit (bit 12 of course-status word) occasionally flips,
+  // producing a negative latitude for devices that are actually in the Northern
+  // hemisphere (India).  Force positive — all current deployments are in India.
+  const latRaw = parseFloat(doc.latitude) || null;
+  const lat = latRaw !== null ? Math.abs(latRaw) : null;
   const lng = parseFloat(doc.longitude) || null;
   const hasGps = lat !== null && lat !== 0 && lng !== null && lng !== 0;
 
