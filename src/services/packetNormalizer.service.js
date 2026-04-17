@@ -60,6 +60,18 @@ const { getCapabilities } = require('../config/deviceCapabilities');
  *   0x13 (STATUS)                      → ACC bit only, no GPS
  *   0x17 (HEARTBEAT)                   → nothing meaningful for state machine
  */
+// GT06 devices often send local time (e.g. IST) in their date bytes, but the
+// GT06 TCP server parses them as UTC via Date.UTC().  This shifts every displayed
+// time forward by the local-timezone offset (e.g. +5:30 for India).
+//
+// Set GT06_TZ_OFFSET_MIN in .env to the device's local UTC offset in minutes
+// (e.g. 330 for IST = UTC+5:30).  The normalizer subtracts this to produce
+// correct UTC timestamps.  Defaults to 0 (no correction).
+//
+// Only applied to device-generated timestamps (LOCATION / COMBINED packets).
+// STATUS and HEARTBEAT packets already use server Date.now() which is real UTC.
+const GT06_TZ_OFFSET_MS = parseInt(process.env.GT06_TZ_OFFSET_MIN || '0', 10) * 60_000;
+
 function normalizeGT06(doc) {
   const lat = parseFloat(doc.latitude) || null;
   const lng = parseFloat(doc.longitude) || null;
@@ -68,10 +80,18 @@ function normalizeGT06(doc) {
   // acc is the ignition source for GT06
   const ignition = doc.acc !== undefined && doc.acc !== null ? !!doc.acc : null;
 
+  // Correct device-generated timestamps (LOCATION/COMBINED) for timezone offset.
+  // STATUS/HEARTBEAT use server Date.now() → no correction needed.
+  let timestamp = new Date(doc.timestamp || doc.serverTimestamp || Date.now());
+  const deviceGenerated = doc.packetType && /^(LOCATION|LOCATION_EXT|COMBINED)$/i.test(doc.packetType);
+  if (GT06_TZ_OFFSET_MS && deviceGenerated) {
+    timestamp = new Date(timestamp.getTime() - GT06_TZ_OFFSET_MS);
+  }
+
   return {
     imei:        doc.imei,
     deviceType:  'GT06',
-    timestamp:   new Date(doc.timestamp || doc.serverTimestamp || Date.now()),
+    timestamp,
 
     lat:         hasGps ? lat : null,
     lng:         hasGps ? lng : null,
