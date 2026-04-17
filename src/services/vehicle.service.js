@@ -744,9 +744,9 @@ const getVehicles = async (clientId) => {
   return vehiclesWithStatus;
 };
 
-const getVehicleById = async (id, clientId) => {
+const getVehicleById = async (id, callerClientIds) => {
   const vehicle = await Vehicle.findOne({
-    where: { id, clientId },
+    where: { id },
     include: [{ model: RtoDetail, as: 'rtoDetail' }],
   });
   if (!vehicle) {
@@ -754,8 +754,12 @@ const getVehicleById = async (id, clientId) => {
     err.status = 404;
     throw err;
   }
-  
-  // Attach GPS data
+  const allowedIds = Array.isArray(callerClientIds) ? callerClientIds : [callerClientIds];
+  if (!allowedIds.includes(vehicle.clientId)) {
+    const err = new Error('Vehicle not found');
+    err.status = 404;
+    throw err;
+  }
   return await attachGpsData(vehicle);
 };
 
@@ -808,9 +812,15 @@ const updateVehicle = async (id, clientId, data, callerClientIds) => {
   return await attachGpsData(vehicle);
 };
 
-const deleteVehicle = async (id, clientId) => {
-  const vehicle = await Vehicle.findOne({ where: { id, clientId } });
+const deleteVehicle = async (id, callerClientIds) => {
+  const vehicle = await Vehicle.findOne({ where: { id } });
   if (!vehicle) {
+    const err = new Error('Vehicle not found');
+    err.status = 404;
+    throw err;
+  }
+  const allowedIds = Array.isArray(callerClientIds) ? callerClientIds : [callerClientIds];
+  if (!allowedIds.includes(vehicle.clientId)) {
     const err = new Error('Vehicle not found');
     err.status = 404;
     throw err;
@@ -906,13 +916,18 @@ const testGpsData = async (imei) => {
  * @param {number} skip - Number of records to skip for pagination (default: 0)
  * @returns {Object} Vehicle info and location history
  */
-const getLocationPlayerData = async (id, clientId, from, to, limit = 10000, skip = 0) => {
-  // Fetch vehicle from MySQL to verify ownership and get IMEI
-  const vehicle = await Vehicle.findOne({
-    where: { id, clientId },
-  });
+const getLocationPlayerData = async (id, callerClientIds, from, to, limit = 10000, skip = 0) => {
+  // Find by id only, then verify the caller has access to its owner client
+  const vehicle = await Vehicle.findOne({ where: { id } });
 
   if (!vehicle) {
+    const err = new Error('Vehicle not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const allowedIds = Array.isArray(callerClientIds) ? callerClientIds : [callerClientIds];
+  if (!allowedIds.includes(vehicle.clientId)) {
     const err = new Error('Vehicle not found');
     err.status = 404;
     throw err;

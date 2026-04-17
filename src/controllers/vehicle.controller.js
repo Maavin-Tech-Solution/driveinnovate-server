@@ -27,7 +27,7 @@ const getVehicles = async (req, res) => {
  */
 const getVehicleById = async (req, res) => {
   try {
-    const vehicle = await vehicleService.getVehicleById(req.params.id, req.user.id);
+    const vehicle = await vehicleService.getVehicleById(req.params.id, req.user.clientIds);
     return res.json({ success: true, data: vehicle });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
@@ -96,7 +96,7 @@ const updateVehicle = async (req, res) => {
  */
 const deleteVehicle = async (req, res) => {
   try {
-    const result = await vehicleService.deleteVehicle(req.params.id, req.user.id);
+    const result = await vehicleService.deleteVehicle(req.params.id, req.user.clientIds);
     return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
@@ -149,9 +149,9 @@ const getLocationPlayerData = async (req, res) => {
     }
     
     const data = await vehicleService.getLocationPlayerData(
-      req.params.id, 
-      req.user.id, 
-      from, 
+      req.params.id,
+      req.user.clientIds,
+      from,
       to,
       limit,
       skip

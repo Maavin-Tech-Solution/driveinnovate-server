@@ -324,9 +324,16 @@ async function processPacket(doc, deviceType) {
  *
  *   C) No VehicleDeviceState row at all for a vehicle that has an in_progress trip
  *      →  orphaned; close the trip.
+ *
+ *   D) trip.endTime is older than STALE_THRESHOLD_MS regardless of engineOn state
+ *      →  server was down when ignition-OFF arrived (Render spin-down); engineOn
+ *         stayed true in MySQL but the engine has long since turned off.
+ *      While the engine is genuinely ON, endTime is updated every ~30 s per packet.
+ *      30 minutes of silence means the device has gone dark or the engine is off.
  */
+const STALE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
+
 async function reconcileStaleTrips() {
-  const { Op } = require('sequelize');
   try {
     const staleTrips = await Trip.findAll({
       where: { status: 'in_progress' },
@@ -344,12 +351,30 @@ async function reconcileStaleTrips() {
     for (const trip of staleTrips) {
       const state = await VehicleDeviceState.findOne({ where: { vehicleId: trip.vehicleId } });
 
-      const shouldClose =
-        !state ||                                       // C: no state row
-        state.currentTripId !== trip.id ||             // A: state no longer references this trip
-        (state.currentTripId === trip.id && !state.engineOn); // B: still referenced but engine OFF
+      // Rule D: endTime hasn't been touched for 15+ minutes → engine is definitely off
+      const endTimeMs   = trip.endTime ? new Date(trip.endTime).getTime() : null;
+      const staleSinceMs = endTimeMs ? Date.now() - endTimeMs : null;
+      const isStale      = staleSinceMs !== null && staleSinceMs > STALE_THRESHOLD_MS;
 
-      if (!shouldClose) continue;
+      console.log(
+        `[Reconcile] trip #${trip.id} vid=${trip.vehicleId}` +
+        ` endTime=${trip.endTime ? new Date(trip.endTime).toISOString() : 'NULL'}` +
+        ` staleMin=${staleSinceMs !== null ? (staleSinceMs / 60000).toFixed(1) : 'N/A'}` +
+        ` state.currentTripId=${state?.currentTripId ?? 'NO_STATE'}` +
+        ` state.engineOn=${state?.engineOn ?? 'NO_STATE'}` +
+        ` isStale=${isStale}`
+      );
+
+      const shouldClose =
+        !state ||                                                 // C: no state row
+        state.currentTripId !== trip.id ||                       // A: state no longer references this trip
+        (state.currentTripId === trip.id && !state.engineOn) ||  // B: still referenced but engine OFF
+        isStale;                                                  // D: endTime stale (server was down)
+
+      if (!shouldClose) {
+        console.log(`[Reconcile] trip #${trip.id} — skipping (no rule matched)`);
+        continue;
+      }
 
       // Use the trip's own endTime (updated live while engine was ON) as the end time.
       // Fall back to state.lastPacketTime, then now.
@@ -363,7 +388,7 @@ async function reconcileStaleTrips() {
 
       // Clear the dangling pointer in device state if it still points here
       if (state?.currentTripId === trip.id) {
-        await state.update({ currentTripId: null });
+        await state.update({ currentTripId: null, engineOn: false });
       }
 
       console.log(`[Reconcile] Closed stale trip #${trip.id} (vehicle ${trip.vehicleId}, ${durationSec}s)`);
@@ -372,7 +397,7 @@ async function reconcileStaleTrips() {
 
     console.log(`[Reconcile] Done — closed ${closed} stale trip(s)`);
   } catch (err) {
-    console.error('[Reconcile] Error during stale-trip reconciliation:', err.message);
+    console.error('[Reconcile] Error during stale-trip reconciliation:', err.message, err.stack);
   }
 }
 

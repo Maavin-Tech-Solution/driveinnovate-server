@@ -106,6 +106,9 @@ sequelize
       console.log(`DriveInnovate Server running on port ${PORT}`);
       startAlertEngine();
       startTrialExpiryJob();
+      // Run stale-trip reconciliation every 10 minutes so trips orphaned by
+      // server spin-down (Render free tier) get closed without needing a restart.
+      setInterval(reconcileStaleTrips, 10 * 60 * 1000);
     });
   })
   .catch((err) => {
