@@ -303,14 +303,22 @@ exports.getRawPackets = async (req, res) => {
 
 /**
  * POST /api/vehicles/:id/reprocess
- * PAPA only — reprocess all MongoDB packets for a vehicle from scratch.
+ * PAPA only — reprocess MongoDB packets for a vehicle.
+ * Accepts optional body { from, to } to limit to a date range.
  */
 exports.reprocess = async (req, res) => {
   try {
+    // Reprocess can take minutes for large date ranges — extend timeout to 10 min
+    req.setTimeout(600_000);
     if (req.user.role !== 'papa') {
       return res.status(403).json({ success: false, message: 'Only papa accounts can reprocess vehicles' });
     }
-    const result = await reprocessVehicle(Number(req.params.id));
+    const from = req.body.from ? parseISTValue(req.body.from, false) : null;
+    const to   = req.body.to   ? parseISTValue(req.body.to,   true)  : null;
+    if (!from || !to) {
+      return res.status(400).json({ success: false, message: 'Date range (from, to) is required' });
+    }
+    const result = await reprocessVehicle(Number(req.params.id), { from, to });
     res.json({ success: true, data: result });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });

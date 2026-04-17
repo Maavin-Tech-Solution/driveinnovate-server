@@ -438,9 +438,11 @@ const fetchAIS140Status = async (LocationModel, imeiVariations) => {
       ? Boolean(absoluteLatest.ignition)
       : (src.ignition != null ? Boolean(src.ignition) : null);
 
-    const emergency = latestEmergency?.emergencyStatus
-      ? true
-      : (absoluteLatest?.emergencyStatus ? true : false);
+    // Emergency is active only while the LATEST packet still carries emergencyStatus=1.
+    // Once the device sends a normal packet (emergencyStatus=0 or field absent), the
+    // emergency is considered cleared — prevents stale EMG packets from locking the
+    // vehicle in "Emergency" state permanently.
+    const emergency = (absoluteLatest?.emergencyStatus === 1) ? true : false;
 
     const aggregatedData = {
       deviceType: 'AIS140',

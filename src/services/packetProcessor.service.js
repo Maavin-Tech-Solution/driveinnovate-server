@@ -597,7 +597,7 @@ async function catchUpMissedPackets() {
  * 3. Replays every MongoDB packet through processPacket in deterministic order.
  * 4. Cleans up micro-trips (noise) and closes any dangling in_progress trip.
  */
-async function reprocessVehicle(vehicleId) {
+async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
   const { Op } = require('sequelize');
 
   const vehicle = await Vehicle.findByPk(vehicleId, {
@@ -617,10 +617,23 @@ async function reprocessVehicle(vehicleId) {
   if (vehicle.imei.startsWith('0')) imeiVariants.push(vehicle.imei.slice(1));
   else imeiVariants.push('0' + vehicle.imei);
 
-  // ── 1. Wipe existing computed data ──────────────────────────────────────────
-  await Trip.destroy({ where: { vehicleId } });
-  await VehicleEngineSession.destroy({ where: { vehicleId } });
-  await VehicleFuelEvent.destroy({ where: { vehicleId } });
+  const hasRange = from || to;
+
+  // ── 1. Wipe existing computed data (scoped to date range if provided) ───────
+  const tripWhere = { vehicleId };
+  const sessionWhere = { vehicleId };
+  const fuelWhere = { vehicleId };
+  if (hasRange) {
+    const rangeFilter = {};
+    if (from) rangeFilter[Op.gte] = from;
+    if (to)   rangeFilter[Op.lte] = to;
+    tripWhere.startTime = rangeFilter;
+    sessionWhere.startTime = rangeFilter;
+    fuelWhere.timestamp = rangeFilter;
+  }
+  await Trip.destroy({ where: tripWhere });
+  await VehicleEngineSession.destroy({ where: sessionWhere });
+  await VehicleFuelEvent.destroy({ where: fuelWhere });
 
   const state = await VehicleDeviceState.findOne({ where: { vehicleId } });
   if (state) {
@@ -642,17 +655,23 @@ async function reprocessVehicle(vehicleId) {
   // Invalidate vehicle cache so processPacket re-reads from DB
   invalidateVehicleCache(vehicle.imei);
 
-  // ── 2. Fetch all packets from MongoDB (deterministic order) ─────────────────
-  // Sort by timestamp first, then _id to break ties deterministically.
-  // Without _id tiebreaker, packets with identical timestamps can appear in
-  // different order each run, producing different trip counts.
+  // ── 2. Fetch packets from MongoDB (deterministic order) ─────────────────────
+  const mongoFilter = { imei: { $in: imeiVariants } };
+  if (hasRange) {
+    mongoFilter.timestamp = {};
+    if (from) mongoFilter.timestamp.$gte = from;
+    if (to)   mongoFilter.timestamp.$lte = to;
+  }
   const packets = await mongoDb
     .collection(caps.mongoCollection)
-    .find({ imei: { $in: imeiVariants } })
+    .find(mongoFilter)
     .sort({ timestamp: 1, _id: 1 })
     .toArray();
 
-  console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packets.length} packets in ${caps.mongoCollection}`);
+  const rangeLabel = hasRange
+    ? ` [${from ? from.toISOString().slice(0,10) : '…'} → ${to ? to.toISOString().slice(0,10) : '…'}]`
+    : ' [ALL]';
+  console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packets.length} packets in ${caps.mongoCollection}${rangeLabel}`);
 
   // ── 3. Replay through processPacket ─────────────────────────────────────────
   let processed = 0;
