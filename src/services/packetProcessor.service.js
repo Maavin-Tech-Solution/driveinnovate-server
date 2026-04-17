@@ -629,7 +629,7 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
     if (to)   rangeFilter[Op.lte] = to;
     tripWhere.startTime = rangeFilter;
     sessionWhere.startTime = rangeFilter;
-    fuelWhere.timestamp = rangeFilter;
+    fuelWhere.eventTime = rangeFilter;
   }
   await Trip.destroy({ where: tripWhere });
   await VehicleEngineSession.destroy({ where: sessionWhere });
