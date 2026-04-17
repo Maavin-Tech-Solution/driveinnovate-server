@@ -275,6 +275,15 @@ const BUILT_INS = [
     defaults: GT06_DEFAULTS,
   },
   {
+    name: 'GT06N GPS Tracker',
+    type: 'GT06N',
+    serverIp: null,
+    serverPort: 9000,                 // same port as GT06 — same TCP server
+    mongoCollection: 'gt06locations', // same collection as GT06
+    isBuiltIn: true,
+    defaults: GT06_DEFAULTS,
+  },
+  {
     name: 'Teltonika FMB125',
     type: 'FMB125',
     serverIp: null,

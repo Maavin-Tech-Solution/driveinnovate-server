@@ -422,9 +422,11 @@ const CATCHUP_BATCH_LIMIT = 5000;                  // max packets per vehicle pe
 
 async function catchUpMissedPackets() {
   const { Op } = require('sequelize');
-  const mongoDb = getMongoDb();
-  if (!mongoDb) {
-    console.log('[CatchUp] MongoDB not connected — skipping');
+  let mongoDb;
+  try {
+    mongoDb = getMongoDb();
+  } catch (e) {
+    console.log('[CatchUp] MongoDB not ready — skipping:', e.message);
     return;
   }
 

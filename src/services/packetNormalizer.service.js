@@ -263,6 +263,7 @@ function normalizeGeneric(doc, deviceType) {
 // ─── Dispatch table ───────────────────────────────────────────────────────────
 const NORMALIZERS = {
   GT06:   normalizeGT06,
+  GT06N:  normalizeGT06,   // GT06N is same protocol/format as GT06
   FMB125: normalizeFMB125,
   FMB920: normalizeFMB920,
   AIS140: normalizeAIS140,

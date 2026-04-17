@@ -69,6 +69,41 @@ const DEVICE_CAPABILITIES = {
     signalField: 'gsm',
   },
 
+  // ─── GT06N ────────────────────────────────────────────────────────────────
+  // GT06N is a newer hardware revision of GT06 — same protocol, same collection.
+  GT06N: {
+    displayName: 'GT06N GPS Tracker',
+    ignitionSource: 'acc-hysteresis',
+    supportsGps: true,
+    supportsAltitude: false,
+    supportsSatellites: true,
+    supportsCourse: true,
+    supportsBattery: true,
+    supportsExternalVoltage: false,
+    supportsExternalBattery: false,
+    supportsOdometer: false,
+    supportsFuel: false,
+    supportsRpm: false,
+    supportsTemperature: false,
+    supportsGsmSignal: true,
+    supportsCellTower: true,
+    supportsDigitalInputs: false,
+    supportsAnalogInputs: false,
+    supportsCustomIo: false,
+    mongoCollection: 'gt06locations',   // same server + collection as GT06
+    packetTypeField: 'packetType',
+    latField: 'latitude',
+    lngField: 'longitude',
+    accField: 'acc',
+    ignitionField: null,
+    fuelField: null,
+    odometerField: null,
+    batteryField: 'battery',
+    altitudeField: null,
+    satellitesField: 'satellites',
+    signalField: 'gsm',
+  },
+
   // ─── FMB125 ───────────────────────────────────────────────────────────────
   FMB125: {
     displayName: 'Teltonika FMB125',
