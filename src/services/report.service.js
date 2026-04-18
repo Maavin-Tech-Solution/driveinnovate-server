@@ -143,7 +143,10 @@ class ReportService {
    * @private
    */
   _createViolationRecord(group, speedLimit) {
-    const duration = Math.floor((group.endTime - group.startTime) / 1000); // seconds
+    // A single-packet overspeed still represents a real violation — clamp to ≥1s
+    // so it doesn't get filtered out when the minDuration threshold is applied.
+    const rawDuration = Math.floor((group.endTime - group.startTime) / 1000);
+    const duration = Math.max(1, rawDuration);
     const excessSpeed = group.maxSpeed - speedLimit;
     const severity = this._calculateSeverity(excessSpeed);
 

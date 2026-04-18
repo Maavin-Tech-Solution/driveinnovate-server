@@ -109,8 +109,8 @@ exports.getSpeedViolationReport = async (req, res) => {
       vehicleIds: scopedIds,
       startDate,
       endDate,
-      severity,
-      acknowledged: acknowledged !== undefined ? acknowledged === 'true' : undefined,
+      severity: severity && severity !== '' ? severity : undefined,
+      acknowledged: acknowledged === 'true' ? true : acknowledged === 'false' ? false : undefined,
       limit: limit ? parseInt(limit) : 100,
       offset: offset ? parseInt(offset) : 0
     };
@@ -119,13 +119,16 @@ exports.getSpeedViolationReport = async (req, res) => {
 
     // If the caller has vehicles but nothing has been saved yet for this range,
     // analyze MongoDB packets now and persist — then re-query so the UI gets data
-    // on the first open of the tab. Skip when a severity/ack filter is active
-    // (we don't want to silently widen their filter).
+    // on the first open of the tab. Skip only when an *active* severity/ack
+    // filter is set (empty strings, which axios sends for untouched dropdowns,
+    // count as no filter).
+    const hasSeverity = severity && severity !== '';
+    const hasAckFilter = acknowledged !== undefined && acknowledged !== '';
     const shouldAutoDetect =
       (!report.violations || report.violations.length === 0) &&
       scopedIds.length > 0 &&
       startDate && endDate &&
-      !severity && acknowledged === undefined;
+      !hasSeverity && !hasAckFilter;
 
     if (shouldAutoDetect) {
       const speedLimit = await getSpeedLimitForUser(req.user.id);
@@ -134,7 +137,7 @@ exports.getSpeedViolationReport = async (req, res) => {
         startDate,
         endDate,
         speedLimit,
-        minDuration: 3,
+        minDuration: 1, // match dashboard counting — any sustained overspeed >=1s
       });
       if (detected.length) {
         await reportService.saveSpeedViolations(detected);
@@ -234,8 +237,8 @@ exports.exportSpeedViolationReport = async (req, res) => {
       vehicleIds: scopedIds,
       startDate,
       endDate,
-      severity,
-      acknowledged: acknowledged !== undefined ? acknowledged === 'true' : undefined,
+      severity: severity && severity !== '' ? severity : undefined,
+      acknowledged: acknowledged === 'true' ? true : acknowledged === 'false' ? false : undefined,
       limit: 10000, // Higher limit for export
       offset: 0
     };
