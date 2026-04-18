@@ -1,4 +1,31 @@
 const reportService = require('../services/report.service');
+const { Op } = require('sequelize');
+const { Vehicle, UserSettings } = require('../models');
+
+/**
+ * Resolve the set of vehicle IDs the caller may query.
+ * – If the caller passes vehicleIds, each one is verified against req.user.clientIds.
+ * – Otherwise we return all vehicles across the caller's network.
+ */
+async function scopeVehicleIds(req, rawVehicleIds) {
+  const clientIds = req.user.clientIds || [req.user.id];
+  let requested = [];
+  if (rawVehicleIds) {
+    requested = Array.isArray(rawVehicleIds) ? rawVehicleIds : [rawVehicleIds];
+    requested = requested.map(Number).filter(Number.isFinite);
+  }
+  const where = { clientId: { [Op.in]: clientIds } };
+  if (requested.length) where.id = { [Op.in]: requested };
+  const rows = await Vehicle.findAll({ where, attributes: ['id'] });
+  return rows.map(r => r.id);
+}
+
+async function getSpeedLimitForUser(userId) {
+  try {
+    const row = await UserSettings.findOne({ where: { userId } });
+    return row?.speedThreshold || 80;
+  } catch (_) { return 80; }
+}
 
 /**
  * Analyze and detect speed violations from location data
@@ -14,12 +41,15 @@ exports.analyzeSpeedViolations = async (req, res) => {
       });
     }
 
+    // Always restrict vehicles to caller's scope
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+
     // Analyze violations
     const violations = await reportService.analyzeSpeedViolations({
-      vehicleIds,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
-      speedLimit: speedLimit || 80,
+      speedLimit: speedLimit || await getSpeedLimitForUser(req.user.id),
       minDuration: minDuration || 3
     });
 
@@ -48,7 +78,10 @@ exports.analyzeSpeedViolations = async (req, res) => {
 };
 
 /**
- * Get speed violation report
+ * Get speed violation report.
+ * – Always scopes to the caller's vehicles (clientIds).
+ * – Auto-runs analyze+save if no saved records exist for the date range,
+ *   so users see up-to-date violations without a manual "detect" step.
  */
 exports.getSpeedViolationReport = async (req, res) => {
   try {
@@ -62,8 +95,18 @@ exports.getSpeedViolationReport = async (req, res) => {
       offset
     } = req.query;
 
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+
+    // No accessible vehicles → return empty result instead of leaking other users' data
+    if (!scopedIds.length) {
+      return res.json({
+        success: true,
+        data: { violations: [], total: 0, stats: { total: 0, acknowledged: 0, unacknowledged: 0, bySeverity: { low: 0, medium: 0, high: 0, critical: 0 }, avgExcessSpeed: 0, maxSpeed: 0 } }
+      });
+    }
+
     const filters = {
-      vehicleIds: vehicleIds ? (Array.isArray(vehicleIds) ? vehicleIds : [vehicleIds]) : undefined,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       severity,
@@ -72,7 +115,32 @@ exports.getSpeedViolationReport = async (req, res) => {
       offset: offset ? parseInt(offset) : 0
     };
 
-    const report = await reportService.getSpeedViolationReport(filters);
+    let report = await reportService.getSpeedViolationReport(filters);
+
+    // If the caller has vehicles but nothing has been saved yet for this range,
+    // analyze MongoDB packets now and persist — then re-query so the UI gets data
+    // on the first open of the tab. Skip when a severity/ack filter is active
+    // (we don't want to silently widen their filter).
+    const shouldAutoDetect =
+      (!report.violations || report.violations.length === 0) &&
+      scopedIds.length > 0 &&
+      startDate && endDate &&
+      !severity && acknowledged === undefined;
+
+    if (shouldAutoDetect) {
+      const speedLimit = await getSpeedLimitForUser(req.user.id);
+      const detected = await reportService.analyzeSpeedViolations({
+        vehicleIds: scopedIds,
+        startDate,
+        endDate,
+        speedLimit,
+        minDuration: 3,
+      });
+      if (detected.length) {
+        await reportService.saveSpeedViolations(detected);
+        report = await reportService.getSpeedViolationReport(filters);
+      }
+    }
 
     res.json({
       success: true,
@@ -123,11 +191,14 @@ exports.acknowledgeViolation = async (req, res) => {
  */
 exports.getVehicleViolationSummary = async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, vehicleIds } = req.query;
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+    if (!scopedIds.length) return res.json({ success: true, data: [] });
 
     const summary = await reportService.getVehicleViolationSummary({
       startDate,
-      endDate
+      endDate,
+      vehicleIds: scopedIds,
     });
 
     res.json({
@@ -157,8 +228,10 @@ exports.exportSpeedViolationReport = async (req, res) => {
       acknowledged
     } = req.query;
 
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+
     const filters = {
-      vehicleIds: vehicleIds ? (Array.isArray(vehicleIds) ? vehicleIds : [vehicleIds]) : undefined,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       severity,
@@ -218,8 +291,10 @@ exports.analyzeTrips = async (req, res) => {
       });
     }
 
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+
     const trips = await reportService.analyzeTrips({
-      vehicleIds,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       minTripDuration,
@@ -255,9 +330,11 @@ exports.analyzeTrips = async (req, res) => {
 exports.getTripReport = async (req, res) => {
   try {
     const { vehicleIds, startDate, endDate, limit, offset } = req.query;
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+    if (!scopedIds.length) return res.json({ success: true, data: { trips: [], total: 0, stats: {} } });
 
     const filters = {
-      vehicleIds: vehicleIds ? (Array.isArray(vehicleIds) ? vehicleIds : [vehicleIds]) : undefined,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       limit: limit ? parseInt(limit) : 100,
@@ -294,8 +371,10 @@ exports.analyzeStops = async (req, res) => {
       });
     }
 
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+
     const stops = await reportService.analyzeStops({
-      vehicleIds,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       minStopDuration
@@ -330,9 +409,11 @@ exports.analyzeStops = async (req, res) => {
 exports.getStopReport = async (req, res) => {
   try {
     const { vehicleIds, startDate, endDate, stopType, limit, offset } = req.query;
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+    if (!scopedIds.length) return res.json({ success: true, data: { stops: [], total: 0, stats: {} } });
 
     const filters = {
-      vehicleIds: vehicleIds ? (Array.isArray(vehicleIds) ? vehicleIds : [vehicleIds]) : undefined,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       stopType,
@@ -362,9 +443,11 @@ exports.getStopReport = async (req, res) => {
 exports.getEngineHoursReport = async (req, res) => {
   try {
     const { vehicleIds, startDate, endDate } = req.query;
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
+    if (!scopedIds.length) return res.json({ success: true, data: [] });
 
     const filters = {
-      vehicleIds: vehicleIds ? (Array.isArray(vehicleIds) ? vehicleIds : [vehicleIds]) : undefined,
+      vehicleIds: scopedIds,
       startDate,
       endDate
     };
@@ -391,9 +474,10 @@ exports.getEngineHoursReport = async (req, res) => {
 exports.exportTripReport = async (req, res) => {
   try {
     const { vehicleIds, startDate, endDate } = req.query;
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
 
     const filters = {
-      vehicleIds: vehicleIds ? (Array.isArray(vehicleIds) ? vehicleIds : [vehicleIds]) : undefined,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       limit: 10000,
@@ -440,9 +524,10 @@ exports.exportTripReport = async (req, res) => {
 exports.exportStopReport = async (req, res) => {
   try {
     const { vehicleIds, startDate, endDate, stopType } = req.query;
+    const scopedIds = await scopeVehicleIds(req, vehicleIds);
 
     const filters = {
-      vehicleIds: vehicleIds ? (Array.isArray(vehicleIds) ? vehicleIds : [vehicleIds]) : undefined,
+      vehicleIds: scopedIds,
       startDate,
       endDate,
       stopType,

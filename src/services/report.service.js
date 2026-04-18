@@ -2,6 +2,16 @@ const { Op } = require('sequelize');
 const { SpeedViolation, Vehicle, User, Trip, Stop } = require('../models');
 const { getMongoDb } = require('../config/mongodb');
 
+// When a caller passes a bare date string (YYYY-MM-DD) for endDate, a naive
+// new Date(endDate) lands at 00:00 UTC — which excludes the whole day of data.
+// Normalize: YYYY-MM-DD end → 23:59:59.999 local, start → 00:00:00.000.
+function normalizeRange(startDate, endDate) {
+  const isBareDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const start = startDate ? (isBareDate(startDate) ? new Date(startDate + 'T00:00:00') : new Date(startDate)) : null;
+  const end   = endDate   ? (isBareDate(endDate)   ? new Date(endDate   + 'T23:59:59.999') : new Date(endDate)) : null;
+  return { start, end };
+}
+
 class ReportService {
   /**
    * Analyze location data and detect speed violations
@@ -22,11 +32,9 @@ class ReportService {
       const LocationData = db.collection('locations');
 
       // Build query - use direct fields (not nested in data)
+      const { start, end } = normalizeRange(startDate, endDate);
       const query = {
-        timestamp: {
-          $gte: new Date(startDate),
-          $lte: new Date(endDate)
-        },
+        timestamp: { $gte: start, $lte: end },
         speed: { $gt: speedLimit, $exists: true }
       };
 
@@ -243,9 +251,8 @@ class ReportService {
       }
 
       if (startDate && endDate) {
-        where.timestamp = {
-          [Op.between]: [new Date(startDate), new Date(endDate)]
-        };
+        const { start, end } = normalizeRange(startDate, endDate);
+        where.timestamp = { [Op.between]: [start, end] };
       }
 
       if (severity) {
@@ -385,14 +392,16 @@ class ReportService {
    * @param {Object} filters - { startDate, endDate }
    */
   async getVehicleViolationSummary(filters) {
-    const { startDate, endDate } = filters;
+    const { startDate, endDate, vehicleIds } = filters;
 
     try {
       const where = {};
       if (startDate && endDate) {
-        where.timestamp = {
-          [Op.between]: [new Date(startDate), new Date(endDate)]
-        };
+        const { start, end } = normalizeRange(startDate, endDate);
+        where.timestamp = { [Op.between]: [start, end] };
+      }
+      if (Array.isArray(vehicleIds) && vehicleIds.length) {
+        where.vehicleId = { [Op.in]: vehicleIds };
       }
 
       const summary = await SpeedViolation.findAll({
