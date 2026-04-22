@@ -46,8 +46,10 @@ const MIGRATIONS = [
   { table: 'di_user', column: 'account_type',    ddl: "ENUM('trial','billable','demo','master') NOT NULL DEFAULT 'trial' COMMENT \"Account subscription type\"" },
   { table: 'di_user', column: 'trial_expires_at', ddl: 'DATETIME NULL COMMENT "Trial expiry timestamp; NULL = no expiry enforced"' },
 
-  // ── di_user_vehicle (per-vehicle subscription expiry) ────────────────────
+  // ── di_user_vehicle (per-vehicle subscription expiry + optional SIMs) ────
   { table: 'di_user_vehicle', column: 'subscription_expires_at', ddl: 'DATETIME NULL COMMENT "Billable subscription expiry per vehicle"' },
+  { table: 'di_user_vehicle', column: 'sim1', ddl: 'VARCHAR(30) NULL COMMENT "Primary SIM number in the GPS device (optional)"' },
+  { table: 'di_user_vehicle', column: 'sim2', ddl: 'VARCHAR(30) NULL COMMENT "Secondary SIM number in the GPS device (optional)"' },
 
   // ── system_settings (trial feature flag + duration) ──────────────────────
   // NOTE: SystemSetting model has NO underscored:true, so Sequelize uses

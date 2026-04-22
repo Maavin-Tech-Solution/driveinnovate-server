@@ -30,6 +30,16 @@ const Vehicle = sequelize.define(
       type: DataTypes.STRING(100),
       allowNull: true,
     },
+    sim1: {
+      type: DataTypes.STRING(30),
+      allowNull: true,
+      comment: 'Primary SIM number in the GPS device (optional)',
+    },
+    sim2: {
+      type: DataTypes.STRING(30),
+      allowNull: true,
+      comment: 'Secondary SIM number in the GPS device (optional)',
+    },
     clientId: {
       type: DataTypes.INTEGER,
       allowNull: false,
