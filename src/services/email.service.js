@@ -21,12 +21,20 @@ function getTransporter() {
     host:   process.env.EMAIL_HOST || 'smtp.gmail.com',
     port:   parseInt(process.env.EMAIL_PORT || '587'),
     secure: process.env.EMAIL_SECURE === 'true',
+    name:   process.env.EMAIL_HELO_HOST || undefined,
     auth: {
       user: process.env.EMAIL_USER || '',
       pass: process.env.EMAIL_PASS || '',
     },
   });
   return _transporter;
+}
+
+function getFromAddress(fallbackName = 'DriveInnovate') {
+  if (process.env.EMAIL_FROM) return process.env.EMAIL_FROM;
+  const user = process.env.EMAIL_USER || 'no-reply@driveinnovate.in';
+  const name = process.env.EMAIL_FROM_NAME || fallbackName;
+  return `"${name}" <${user}>`;
 }
 
 /**
@@ -58,7 +66,7 @@ async function sendAlertEmail({ subject, htmlBody, extraEmails = '' }) {
   const recipients = getRecipients(extraEmails);
   if (!recipients.length) return;
 
-  const from = `"${process.env.EMAIL_FROM_NAME || 'DriveInnovate Alerts'}" <${process.env.EMAIL_USER || 'smartchallan@gmail.com'}>`;
+  const from = getFromAddress('DriveInnovate Alerts');
 
   try {
     const transporter = getTransporter();
@@ -177,7 +185,7 @@ async function sendTrialExpiryWarningEmail({ clientName, clientEmail, dealerEmai
   const recipients = [...new Set([clientEmail, dealerEmail, papaEmail].filter(Boolean))];
   if (!recipients.length) return;
 
-  const from = `"${process.env.EMAIL_FROM_NAME || 'DriveInnovate'}" <${process.env.EMAIL_USER || 'no-reply@driveinnovate.in'}>`;
+  const from = getFromAddress('DriveInnovate');
   const expiryStr = new Date(trialExpiresAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
   const urgencyColor = daysLeft <= 2 ? '#dc2626' : daysLeft <= 4 ? '#d97706' : '#2563eb';
 
@@ -249,4 +257,4 @@ async function sendTrialExpiryWarningEmail({ clientName, clientEmail, dealerEmai
   }
 }
 
-module.exports = { sendAlertEmail, buildAlertEmailHtml, getRecipients, sendTrialExpiryWarningEmail };
+module.exports = { sendAlertEmail, buildAlertEmailHtml, getRecipients, sendTrialExpiryWarningEmail, getTransporter, getFromAddress };
