@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 const { sequelize } = require('./src/models');
 const routes = require('./src/routes');
 const mongoose = require('mongoose');
@@ -108,8 +110,10 @@ sequelize
       });
   })
   .then(() => {
-    app.listen(PORT, () => {
-      console.log(`DriveInnovate Server running on port ${PORT}`);
+    const server = buildServer(app);
+    server.listen(PORT, () => {
+      const proto = server instanceof https.Server ? 'HTTPS' : 'HTTP';
+      console.log(`DriveInnovate Server running on ${proto} port ${PORT}`);
       startAlertEngine();
       startTrialExpiryJob();
       // Run stale-trip reconciliation every 10 minutes so trips orphaned by
@@ -121,6 +125,32 @@ sequelize
     console.error('Failed to connect to MySQL database:', err.message);
     process.exit(1);
   });
+
+/**
+ * Build the HTTP or HTTPS server that wraps the Express app.
+ *
+ * When SSL_CERT and SSL_KEY both point to readable files, an HTTPS server is
+ * returned (Node terminates TLS directly — no nginx needed in front).
+ * Otherwise, a plain HTTP server is returned so local dev keeps working
+ * without certs.
+ */
+function buildServer(expressApp) {
+  const fs = require('fs');
+  const certPath = process.env.SSL_CERT;
+  const keyPath  = process.env.SSL_KEY;
+
+  if (certPath && keyPath) {
+    try {
+      const cert = fs.readFileSync(certPath);
+      const key  = fs.readFileSync(keyPath);
+      console.log(`✓ TLS enabled — cert=${certPath}`);
+      return https.createServer({ cert, key }, expressApp);
+    } catch (err) {
+      console.warn(`⚠ SSL_CERT/SSL_KEY set but unreadable (${err.message}) — falling back to HTTP`);
+    }
+  }
+  return http.createServer(expressApp);
+}
 
 /**
  * Watch MongoDB collections for new packets and run them through the
