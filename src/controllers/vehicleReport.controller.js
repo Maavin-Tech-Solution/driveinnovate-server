@@ -100,6 +100,16 @@ exports.getFuelFillings = async (req, res) => {
   }
 };
 
+exports.getFuelReport = async (req, res) => {
+  try {
+    const { from, to } = parseRange(req.query);
+    const data = await vehicleReportService.getFuelReport(req.params.id, from, to);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
 exports.exportReport = async (req, res) => {
   try {
     const { type } = req.query;

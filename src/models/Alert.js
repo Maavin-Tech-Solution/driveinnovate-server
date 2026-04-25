@@ -16,9 +16,10 @@ const Alert = sequelize.define('Alert', {
    * SPEED_EXCEEDED  — vehicle speed > threshold (km/h)
    * NOT_MOVING      — vehicle speed = 0 for >= threshold minutes
    * IDLE_ENGINE     — engine ON + speed = 0 for >= threshold minutes
+   * FUEL_THEFT      — fuel drops by >= threshold litres within windowMinutes
    */
   type: {
-    type: DataTypes.ENUM('SPEED_EXCEEDED', 'NOT_MOVING', 'IDLE_ENGINE'),
+    type: DataTypes.ENUM('SPEED_EXCEEDED', 'NOT_MOVING', 'IDLE_ENGINE', 'FUEL_THEFT'),
     allowNull: false,
   },
 
@@ -36,8 +37,14 @@ const Alert = sequelize.define('Alert', {
   vehicleId: { type: DataTypes.INTEGER, allowNull: true, field: 'vehicle_id' },
   groupId:   { type: DataTypes.INTEGER, allowNull: true, field: 'group_id' },
 
-  /** km/h for SPEED_EXCEEDED; minutes for NOT_MOVING / IDLE_ENGINE */
+  /** km/h for SPEED_EXCEEDED; minutes for NOT_MOVING / IDLE_ENGINE; litres for FUEL_THEFT */
   threshold: { type: DataTypes.DECIMAL(8, 2), allowNull: false },
+
+  /**
+   * FUEL_THEFT only: the window (minutes) in which the drop must occur.
+   * e.g. threshold=10, windowMinutes=5 → fire if 10 L dropped within 5 min.
+   */
+  windowMinutes: { type: DataTypes.INTEGER, allowNull: true, field: 'window_minutes' },
 
   isActive: { type: DataTypes.BOOLEAN, defaultValue: true, field: 'is_active' },
 

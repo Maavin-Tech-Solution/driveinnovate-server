@@ -765,7 +765,7 @@ const getVehicleById = async (id, callerClientIds) => {
   return await attachGpsData(vehicle);
 };
 
-const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, deviceName, deviceType, serverIp, serverPort, vehicleIcon }) => {
+const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, deviceName, deviceType, serverIp, serverPort, vehicleIcon, fuelSupported, fuelTankCapacity }) => {
   if (vehicleNumber) {
     const existing = await Vehicle.findOne({ where: { vehicleNumber: vehicleNumber.toUpperCase() } });
     if (existing) {
@@ -794,6 +794,8 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
     serverIp: serverIp || null,
     serverPort: serverPort ? parseInt(serverPort, 10) : null,
     vehicleIcon: vehicleIcon || 'car',
+    fuelSupported: !!fuelSupported,
+    fuelTankCapacity: fuelTankCapacity ? parseInt(fuelTankCapacity, 10) : null,
   });
 };
 

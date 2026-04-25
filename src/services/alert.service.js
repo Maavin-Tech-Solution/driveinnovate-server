@@ -17,10 +17,13 @@ const getAlertById = async (id, clientId) => {
 };
 
 const createAlert = async (clientId, data) => {
-  const { name, description, type, scope, vehicleId, groupId, threshold, cooldownMinutes, notifyEmails, isActive } = data;
+  const { name, description, type, scope, vehicleId, groupId, threshold, windowMinutes, cooldownMinutes, notifyEmails, isActive } = data;
   if (!name?.trim()) { const e = new Error('Alert name is required'); e.status = 400; throw e; }
   if (!type) { const e = new Error('Alert type is required'); e.status = 400; throw e; }
   if (!threshold || isNaN(threshold)) { const e = new Error('Threshold is required'); e.status = 400; throw e; }
+  if (type === 'FUEL_THEFT' && (!windowMinutes || isNaN(windowMinutes))) {
+    const e = new Error('windowMinutes is required for FUEL_THEFT alerts'); e.status = 400; throw e;
+  }
 
   // Ownership checks
   if (scope === 'VEHICLE' && vehicleId) {
@@ -41,6 +44,7 @@ const createAlert = async (clientId, data) => {
     vehicleId: scope === 'VEHICLE' ? vehicleId : null,
     groupId: scope === 'GROUP' ? groupId : null,
     threshold: parseFloat(threshold),
+    windowMinutes: windowMinutes ? parseInt(windowMinutes) : null,
     cooldownMinutes: cooldownMinutes ? parseInt(cooldownMinutes) : 30,
     notifyEmails: notifyEmails || null,
     isActive: isActive !== false,
@@ -50,7 +54,7 @@ const createAlert = async (clientId, data) => {
 const updateAlert = async (id, clientId, data) => {
   const alert = await Alert.findOne({ where: { id, clientId } });
   if (!alert) { const e = new Error('Alert not found'); e.status = 404; throw e; }
-  const { name, description, type, scope, vehicleId, groupId, threshold, cooldownMinutes, notifyEmails, isActive } = data;
+  const { name, description, type, scope, vehicleId, groupId, threshold, windowMinutes, cooldownMinutes, notifyEmails, isActive } = data;
   await alert.update({
     name: name ? name.trim() : alert.name,
     description: description !== undefined ? description : alert.description,
@@ -59,6 +63,7 @@ const updateAlert = async (id, clientId, data) => {
     vehicleId: scope === 'VEHICLE' ? vehicleId : (scope === 'GROUP' || scope === 'ALL' ? null : alert.vehicleId),
     groupId:   scope === 'GROUP'   ? groupId   : (scope === 'VEHICLE' || scope === 'ALL' ? null : alert.groupId),
     threshold: threshold != null ? parseFloat(threshold) : alert.threshold,
+    windowMinutes: windowMinutes != null ? parseInt(windowMinutes) : alert.windowMinutes,
     cooldownMinutes: cooldownMinutes != null ? parseInt(cooldownMinutes) : alert.cooldownMinutes,
     notifyEmails: notifyEmails !== undefined ? (notifyEmails || null) : alert.notifyEmails,
     isActive: isActive !== undefined ? isActive : alert.isActive,

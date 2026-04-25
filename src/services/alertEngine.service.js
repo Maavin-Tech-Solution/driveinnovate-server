@@ -17,6 +17,7 @@
 const { Op } = require('sequelize');
 const { Alert, Notification, Vehicle, VehicleDeviceState, VehicleGroup, VehicleGroupMember } = require('../models');
 const { sendAlertEmail, buildAlertEmailHtml } = require('./email.service');
+const { FMB125Location } = require('../config/mongodb');
 
 const CHECK_INTERVAL_MS = parseInt(process.env.ALERT_CHECK_INTERVAL_MS || '60000'); // 60 s
 
@@ -124,9 +125,79 @@ async function triggerAlert(alert, vehicle, message, metadata) {
   console.log(`[AlertEngine] TRIGGERED: ${title}`);
 }
 
+// ── FUEL_THEFT check ─────────────────────────────────────────────────────────
+// Evaluated once per tick per (alert, vehicle). Reads the last `windowMinutes`
+// of FMB125 packets carrying a fuelLevel, converts % → litres via the tank
+// capacity, and fires if the drop from max → most-recent within the window
+// exceeds the threshold.
+//
+// Quiet skips (no error, no alert):
+//   - Vehicle is not an FMB family device
+//   - Vehicle does not have fuelSupported=true or tankCapacity missing
+//   - Fewer than 2 fuel-carrying packets in the window
+async function checkFuelTheft(alert, vehicle) {
+  if (!vehicle.fuelSupported || !vehicle.fuelTankCapacity) return;
+  const deviceType = (vehicle.deviceType || '').toUpperCase();
+  if (!deviceType.startsWith('FMB')) return;
+
+  const windowMin = parseInt(alert.windowMinutes, 10) || 5;
+  const thresholdL = parseFloat(alert.threshold) || 0;
+  if (thresholdL <= 0) return;
+
+  const tank = parseInt(vehicle.fuelTankCapacity, 10);
+
+  const imei = String(vehicle.imei || '').trim();
+  if (!imei) return;
+  const imeiVars = [imei, imei.replace(/^0+/, ''), '0' + imei].filter(Boolean);
+
+  const since = new Date(Date.now() - windowMin * 60 * 1000);
+
+  const rows = await FMB125Location.find({
+    imei: { $in: imeiVars },
+    timestamp: { $gte: since },
+    fuelLevel: { $exists: true, $ne: null },
+  })
+    .sort({ timestamp: 1 })
+    .select('timestamp fuelLevel ignition speed')
+    .lean();
+
+  if (rows.length < 2) return;
+
+  // Max reading anywhere in the window vs the most recent
+  let maxPct = -Infinity;
+  for (const r of rows) if (r.fuelLevel > maxPct) maxPct = r.fuelLevel;
+  const lastPct  = rows[rows.length - 1].fuelLevel;
+  const dropPct  = maxPct - lastPct;
+  const dropL    = (dropPct / 100) * tank;
+
+  if (dropL < thresholdL) return;
+  if (inCooldown(alert, vehicle.id)) return;
+
+  await triggerAlert(
+    alert, vehicle,
+    `Fuel dropped by ${dropL.toFixed(1)} L in the last ${windowMin} min for ${vehicle.vehicleNumber || vehicle.vehicleName} (${maxPct.toFixed(1)}% → ${lastPct.toFixed(1)}%, threshold ${thresholdL} L).`,
+    {
+      vehicleNumber: vehicle.vehicleNumber,
+      vehicleName:   vehicle.vehicleName,
+      dropLitres:    +dropL.toFixed(2),
+      dropPct:       +dropPct.toFixed(2),
+      maxPct:        +maxPct.toFixed(2),
+      lastPct:       +lastPct.toFixed(2),
+      windowMinutes: windowMin,
+      thresholdLitres: thresholdL,
+    }
+  );
+}
+
 // ── Per-type condition checks ────────────────────────────────────────────────
 
 async function checkVehicle(alert, vehicle) {
+  // FUEL_THEFT has its own path — reads Mongo, not VehicleDeviceState.
+  if (alert.type === 'FUEL_THEFT') {
+    await checkFuelTheft(alert, vehicle);
+    return;
+  }
+
   const state = vehicle.deviceState;
   if (!state) return; // No device state yet — skip
 

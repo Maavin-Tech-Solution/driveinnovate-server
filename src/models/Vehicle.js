@@ -96,6 +96,19 @@ const Vehicle = sequelize.define(
       defaultValue: 5,
       comment: 'Minimum fuel % increase to count as a fill event',
     },
+    fuelSupported: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      field: 'fuel_supported',
+      comment: 'True if this vehicle has a fuel-level sensor wired (FMB only).',
+    },
+    fuelTankCapacity: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      field: 'fuel_tank_capacity',
+      comment: 'Tank capacity in litres. Required when fuelSupported=true to resolve % → L.',
+    },
     subscriptionExpiresAt: {
       type: DataTypes.DATE,
       allowNull: true,

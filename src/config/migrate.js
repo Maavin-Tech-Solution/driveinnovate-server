@@ -50,6 +50,11 @@ const MIGRATIONS = [
   { table: 'di_user_vehicle', column: 'subscription_expires_at', ddl: 'DATETIME NULL COMMENT "Billable subscription expiry per vehicle"' },
   { table: 'di_user_vehicle', column: 'sim1', ddl: 'VARCHAR(30) NULL COMMENT "Primary SIM number in the GPS device (optional)"' },
   { table: 'di_user_vehicle', column: 'sim2', ddl: 'VARCHAR(30) NULL COMMENT "Secondary SIM number in the GPS device (optional)"' },
+  { table: 'di_user_vehicle', column: 'fuel_supported',      ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "True if vehicle has a fuel-level sensor wired (FMB only)"' },
+  { table: 'di_user_vehicle', column: 'fuel_tank_capacity',  ddl: 'INT NULL COMMENT "Tank capacity in litres (required when fuel_supported=1)"' },
+
+  // ── alerts (FUEL_THEFT support) ──────────────────────────────────────────
+  { table: 'alerts', column: 'window_minutes', ddl: 'INT NULL COMMENT "FUEL_THEFT: drop-window in minutes (threshold column holds the litres value)"' },
 
   // ── system_settings (trial feature flag + duration) ──────────────────────
   // NOTE: SystemSetting model has NO underscored:true, so Sequelize uses
@@ -72,6 +77,12 @@ const ENUM_PATCHES = [
     column:       'account_type',
     mustContain:  'master',
     fullDdl:      "ENUM('trial','billable','demo','master') NOT NULL DEFAULT 'trial' COMMENT \"Account subscription type\"",
+  },
+  {
+    table:        'alerts',
+    column:       'type',
+    mustContain:  'FUEL_THEFT',
+    fullDdl:      "ENUM('SPEED_EXCEEDED','NOT_MOVING','IDLE_ENGINE','FUEL_THEFT') NOT NULL",
   },
 ];
 

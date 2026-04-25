@@ -603,12 +603,123 @@ function fuelFillingsToCsv(data) {
   return [header, ...rows, total].join('\n');
 }
 
+// ─── 6. FUEL TIME-SERIES REPORT ──────────────────────────────────────────────
+/**
+ * Fuel-level readings over time for a single vehicle.
+ *
+ * FMB-only — AIS140 and GT06 do not report fuel level in our fleet. Vehicle
+ * must have fuelSupported=true and a non-null fuelTankCapacity. Data is read
+ * from fmb125locations, filtered to points that actually carry a fuelLevel.
+ *
+ * If the range is dense (>MAX_POINTS) the series is downsampled by striding,
+ * which keeps wall-clock transfer cost bounded while preserving shape.
+ * Consumers that need the raw packets can query the Debug → Packet Explorer.
+ */
+const MAX_FUEL_POINTS = 1000;
+
+async function getFuelReport(vehicleId, from, to) {
+  // Lazy-load to avoid circular imports during bootstrap (models pull in
+  // sequelize, which pulls in config, which re-imports services in dev).
+  const { FMB125Location } = require('../config/mongodb');
+  const { Vehicle } = require('../models');
+
+  const vehicle = await Vehicle.findByPk(vehicleId);
+  if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
+
+  if (!vehicle.fuelSupported) {
+    return {
+      unit: vehicle.vehicleNumber,
+      supported: false,
+      message: 'Fuel sensor not configured for this vehicle. Enable "Fuel sensor wired" in Edit Vehicle and set the tank capacity.',
+      summary: null,
+      readings: [],
+    };
+  }
+  const tankCapacity = parseInt(vehicle.fuelTankCapacity, 10) || null;
+
+  const imei     = String(vehicle.imei || '').trim();
+  const imeiVars = imei ? [imei, imei.replace(/^0+/, ''), '0' + imei].filter(Boolean) : [];
+
+  const raw = await FMB125Location.find({
+    imei: { $in: imeiVars },
+    timestamp: { $gte: new Date(from), $lte: new Date(to) },
+    fuelLevel: { $exists: true, $ne: null },
+  })
+    .sort({ timestamp: 1 })
+    .select('timestamp fuelLevel ignition speed latitude longitude')
+    .lean();
+
+  if (raw.length === 0) {
+    return {
+      unit: vehicle.vehicleNumber,
+      supported: true,
+      tankCapacity,
+      summary: { count: 0, startPct: null, endPct: null, minPct: null, maxPct: null, totalDrop: 0, totalFill: 0 },
+      readings: [],
+    };
+  }
+
+  // Downsample for UI transfer — keep the first and last points, stride the rest.
+  const stride = Math.max(1, Math.ceil(raw.length / MAX_FUEL_POINTS));
+  const readings = [];
+  for (let i = 0; i < raw.length; i += stride) readings.push(raw[i]);
+  if (readings[readings.length - 1] !== raw[raw.length - 1]) readings.push(raw[raw.length - 1]);
+
+  // Summary metrics are computed off the FULL raw series (not the downsampled
+  // one) so min/max and drop/fill totals are accurate regardless of stride.
+  let minPct = Infinity;
+  let maxPct = -Infinity;
+  let totalDrop = 0;
+  let totalFill = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const lvl = raw[i].fuelLevel;
+    if (lvl < minPct) minPct = lvl;
+    if (lvl > maxPct) maxPct = lvl;
+    if (i > 0) {
+      const delta = lvl - raw[i - 1].fuelLevel;
+      if (delta > 0) totalFill += delta;
+      else           totalDrop += -delta;
+    }
+  }
+
+  const toL = (pct) => (tankCapacity && pct != null ? (pct / 100) * tankCapacity : null);
+
+  return {
+    unit: vehicle.vehicleNumber,
+    supported: true,
+    tankCapacity,
+    summary: {
+      count: raw.length,
+      startPct: raw[0].fuelLevel,
+      endPct:   raw[raw.length - 1].fuelLevel,
+      minPct,
+      maxPct,
+      totalDrop,
+      totalFill,
+      startL: toL(raw[0].fuelLevel),
+      endL:   toL(raw[raw.length - 1].fuelLevel),
+      totalDropL: toL(totalDrop),
+      totalFillL: toL(totalFill),
+    },
+    readings: readings.map(r => ({
+      timestamp: r.timestamp,
+      levelPct:  r.fuelLevel,
+      levelL:    toL(r.fuelLevel),
+      ignition:  r.ignition ?? null,
+      speed:     r.speed    ?? null,
+      lat:       r.latitude  ?? null,
+      lng:       r.longitude ?? null,
+    })),
+  };
+}
+
 module.exports = {
   getSummary,
   getDailyStats,
   getEngineHours,
   getTrips,
   getFuelFillings,
+  getFuelReport,
   exportAllToExcel,
   summaryToCsv,
   dailyToCsv,

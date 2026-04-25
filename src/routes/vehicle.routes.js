@@ -45,6 +45,7 @@ router.get('/:id/reports/daily',         validateConsumer, vehicleReportControll
 router.get('/:id/reports/engine-hours',  validateConsumer, vehicleReportController.getEngineHours);
 router.get('/:id/reports/trips',         validateConsumer, vehicleReportController.getTrips);
 router.get('/:id/reports/fuel-fillings', validateConsumer, vehicleReportController.getFuelFillings);
+router.get('/:id/reports/fuel',          validateConsumer, vehicleReportController.getFuelReport);
 router.get('/:id/reports/export',        validateConsumer, vehicleReportController.exportReport);
 router.get('/:id/reports/export-xlsx',   validateConsumer, vehicleReportController.exportExcel);
 router.get('/:id/reports/raw-packets',   validateConsumer, vehicleReportController.getRawPackets);
