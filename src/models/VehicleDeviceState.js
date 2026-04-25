@@ -63,6 +63,15 @@ const VehicleDeviceState = sequelize.define('VehicleDeviceState', {
 
   // ── Motion & performance ─────────────────────────────────────────────────
   lastSpeed: { type: DataTypes.SMALLINT, allowNull: true, field: 'last_speed' },
+  // ── State-machine duration trackers (drive Idle / Running rules) ─────────
+  speedZeroSince: {
+    type: DataTypes.DATE, allowNull: true, field: 'speed_zero_since',
+    comment: 'When speed last became 0; cleared the next time speed > 0. Drives the Idle rule (engine on + 4-min zero-speed window).',
+  },
+  runningStreak: {
+    type: DataTypes.TINYINT.UNSIGNED, allowNull: false, defaultValue: 0, field: 'running_streak',
+    comment: 'Consecutive packets observed with speed > 5 km/h. Drives the Running rule (3 in a row to avoid flapping).',
+  },
   lastOdometer: {
     type: DataTypes.DECIMAL(12, 3), allowNull: true, field: 'last_odometer',
     comment: 'Haversine-accumulated distance (km) — used when device has no hardware odometer',

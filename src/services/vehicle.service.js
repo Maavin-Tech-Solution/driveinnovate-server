@@ -668,7 +668,8 @@ const attachComprehensiveStatus = async (vehicle) => {
     fetchComprehensiveDeviceStatus(vehicleJson.imei, vehicleJson.deviceType),
     VehicleDeviceState.findOne({
       where: { vehicleId: vehicleJson.id },
-      attributes: ['engineOn', 'lastPacketTime', 'lastLat', 'lastLng', 'lastSpeed', 'lastAltitude', 'lastSatellites', 'lastCourse'],
+      attributes: ['engineOn', 'lastPacketTime', 'lastLat', 'lastLng', 'lastSpeed', 'lastAltitude', 'lastSatellites', 'lastCourse',
+                   'engineOffSince', 'speedZeroSince', 'runningStreak'],
     }),
   ]);
 
@@ -723,6 +724,22 @@ const attachComprehensiveStatus = async (vehicle) => {
         };
       }
     }
+  }
+
+  // ── Derived state-machine fields ─────────────────────────────────────────
+  // The client-side state evaluator (utils/vehicleState.js) reads these to
+  // resolve the Idle / Stopped / Running rules.  Computed once here so every
+  // chip / marker / detail card shares the same authoritative numbers.
+  if (state && deviceStatus) {
+    deviceStatus.status = deviceStatus.status || {};
+    const now = Date.now();
+    deviceStatus.status.ignitionOffSeconds = state.engineOffSince
+      ? Math.floor((now - new Date(state.engineOffSince).getTime()) / 1000)
+      : null;
+    deviceStatus.status.speedZeroSeconds = state.speedZeroSince
+      ? Math.floor((now - new Date(state.speedZeroSince).getTime()) / 1000)
+      : null;
+    deviceStatus.status.runningStreak = state.runningStreak ?? 0;
   }
 
   return { ...vehicleJson, deviceStatus };

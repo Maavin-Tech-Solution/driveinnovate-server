@@ -2,267 +2,78 @@ const { DeviceConfig, StateDefinition } = require('../models');
 const { getCapabilities }               = require('../config/deviceCapabilities');
 
 // ─── Default state definitions ────────────────────────────────────────────────
+// Spec mirrored in docs/vehicle-states.xlsx (regenerate via
+// `node scripts/gen-vehicle-states.js` after any change here).
+//
+// Six states only — applied identically across every device type.
+//
+//   10  Offline    no packet in last 2 min      → lastSeenSeconds > 120
+//   20  Speeding   speed at/above threshold     → speed >= 80 (editable per device)
+//   30  Running    speed > 5 in 3 packets       → runningStreak >= 3
+//   40  Idle       engine ON + 4 min stationary → ignition=true AND speedZeroSeconds >= 240
+//   50  Stopped    engine OFF for 5 min         → ignition=false AND ignitionOffSeconds >= 300
+//   99  Online     fallback / online-but-no-state-yet  (isDefault)
 
-// No Signal threshold: 15 minutes without any packet → device is offline/unreachable
-const NO_SIGNAL_SECONDS = 900;
+const OFFLINE_SECONDS  = 120;       // 2 min — Offline rule
+const SPEEDING_KMPH    = 80;        // editable per device type via Master Settings
+const RUNNING_STREAK   = 3;         // consecutive packets above 5 km/h
+const IDLE_ZERO_SECS   = 240;       // 4 min — engine-on stationary window
+const STOPPED_OFF_SECS = 300;       // 5 min — engine-off settling window
 
-const GT06_DEFAULTS = [
+const SHARED_DEFAULTS = [
   {
-    // Priority 1: device has gone silent — no packet in 15+ min.
-    // Must be checked FIRST so stale ignition/speed values don't match Running/Idle.
-    stateName: 'No Signal',
-    stateColor: '#64748B',
-    stateIcon: '📵',
-    priority: 1,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
+    stateName: 'Offline',
+    stateColor: '#64748B', stateIcon: '📵', priority: 10, conditionLogic: 'AND',
+    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: OFFLINE_SECONDS }],
     isDefault: false,
   },
   {
-    // Priority 2: device is live but has no GPS fix
-    stateName: 'No GPS',
-    stateColor: '#F59E0B',
-    stateIcon: '📡',
-    priority: 2,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Overspeed',
-    stateColor: '#DC2626',
-    stateIcon: '🏎️',
-    priority: 3,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
+    stateName: 'Speeding',
+    stateColor: '#DC2626', stateIcon: '🏎️', priority: 20, conditionLogic: 'AND',
+    conditions: [{ field: 'speed', operator: 'gte', value: SPEEDING_KMPH }],
     isDefault: false,
   },
   {
     stateName: 'Running',
-    stateColor: '#16A34A',
-    stateIcon: '🟢',
-    priority: 4,
-    conditionLogic: 'AND',
-    conditions: [
-      { field: 'ignition', operator: 'eq', value: true },
-      { field: 'speed', operator: 'gte', value: 5 },
-    ],
+    stateColor: '#16A34A', stateIcon: '🟢', priority: 30, conditionLogic: 'AND',
+    conditions: [{ field: 'runningStreak', operator: 'gte', value: RUNNING_STREAK }],
     isDefault: false,
   },
   {
     stateName: 'Idle',
-    stateColor: '#D97706',
-    stateIcon: '⏸️',
-    priority: 5,
-    conditionLogic: 'AND',
+    stateColor: '#D97706', stateIcon: '⏸️', priority: 40, conditionLogic: 'AND',
     conditions: [
-      { field: 'ignition', operator: 'eq', value: true },
-      { field: 'speed', operator: 'lt', value: 5 },
+      { field: 'ignition',         operator: 'eq',  value: true },
+      { field: 'speedZeroSeconds', operator: 'gte', value: IDLE_ZERO_SECS },
     ],
     isDefault: false,
   },
   {
     stateName: 'Stopped',
-    stateColor: '#EF4444',
-    stateIcon: '🔴',
-    priority: 6,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'ignition', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Unknown',
-    stateColor: '#94A3B8',
-    stateIcon: '❓',
-    priority: 99,
-    conditionLogic: 'AND',
-    conditions: [],
-    isDefault: true,
-  },
-];
-
-const FMB125_DEFAULTS = [
-  {
-    stateName: 'No Signal',
-    stateColor: '#64748B',
-    stateIcon: '📵',
-    priority: 1,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
-    isDefault: false,
-  },
-  {
-    stateName: 'No GPS',
-    stateColor: '#F59E0B',
-    stateIcon: '📡',
-    priority: 2,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Overspeed',
-    stateColor: '#DC2626',
-    stateIcon: '🏎️',
-    priority: 3,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Running',
-    stateColor: '#16A34A',
-    stateIcon: '🟢',
-    priority: 4,
-    conditionLogic: 'AND',
+    stateColor: '#EF4444', stateIcon: '🔴', priority: 50, conditionLogic: 'AND',
     conditions: [
-      { field: 'ignition', operator: 'eq', value: true },
-      { field: 'speed', operator: 'gte', value: 1 },
+      { field: 'ignition',           operator: 'eq',  value: false },
+      { field: 'ignitionOffSeconds', operator: 'gte', value: STOPPED_OFF_SECS },
     ],
     isDefault: false,
   },
   {
-    stateName: 'Idle',
-    stateColor: '#D97706',
-    stateIcon: '⏸️',
-    priority: 5,
-    conditionLogic: 'AND',
-    conditions: [
-      { field: 'ignition', operator: 'eq', value: true },
-      { field: 'speed', operator: 'lt', value: 1 },
-    ],
-    isDefault: false,
-  },
-  {
-    stateName: 'Stopped',
-    stateColor: '#EF4444',
-    stateIcon: '🔴',
-    priority: 6,
-    conditionLogic: 'AND',
-    conditions: [{ field: 'ignition', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Unknown',
-    stateColor: '#94A3B8',
-    stateIcon: '❓',
-    priority: 99,
-    conditionLogic: 'AND',
-    conditions: [],
-    isDefault: true,
-  },
-];
-
-// ─── Seed built-in device configs on server startup ───────────────────────────
-
-// ─── Shared state definitions for Teltonika devices (FMB125, FMB920) ──────────
-// Same state logic; only the ignitionSource differs (handled in packetProcessor).
-const TELTONIKA_DEFAULTS = [
-  {
-    stateName: 'No Signal',
-    stateColor: '#64748B', stateIcon: '📵', priority: 1, conditionLogic: 'AND',
-    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
-    isDefault: false,
-  },
-  {
-    stateName: 'No GPS',
-    stateColor: '#F59E0B', stateIcon: '📡', priority: 2, conditionLogic: 'AND',
-    conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Overspeed',
-    stateColor: '#DC2626', stateIcon: '🏎️', priority: 3, conditionLogic: 'AND',
-    conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Running',
-    stateColor: '#16A34A', stateIcon: '🟢', priority: 4, conditionLogic: 'AND',
-    conditions: [
-      { field: 'ignition', operator: 'eq', value: true },
-      { field: 'speed',    operator: 'gte', value: 1 },
-    ],
-    isDefault: false,
-  },
-  {
-    stateName: 'Idle',
-    stateColor: '#D97706', stateIcon: '⏸️', priority: 5, conditionLogic: 'AND',
-    conditions: [
-      { field: 'ignition', operator: 'eq', value: true },
-      { field: 'speed',    operator: 'lt',  value: 1 },
-    ],
-    isDefault: false,
-  },
-  {
-    stateName: 'Stopped',
-    stateColor: '#EF4444', stateIcon: '🔴', priority: 6, conditionLogic: 'AND',
-    conditions: [{ field: 'ignition', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Unknown',
-    stateColor: '#94A3B8', stateIcon: '❓', priority: 99, conditionLogic: 'AND',
+    // Default fallback — fires whenever Offline does NOT match (so the device
+    // is online) and none of the motion-state rules above have triggered yet
+    // (e.g. just after ignition-off, or while runningStreak is still building).
+    stateName: 'Online',
+    stateColor: '#0EA5E9', stateIcon: '🌐', priority: 99, conditionLogic: 'AND',
     conditions: [], isDefault: true,
   },
 ];
 
-// ─── AIS-140 state definitions ─────────────────────────────────────────────────
-const AIS140_DEFAULTS = [
-  {
-    stateName: 'No Signal',
-    stateColor: '#64748B', stateIcon: '📵', priority: 1, conditionLogic: 'AND',
-    conditions: [{ field: 'lastSeenSeconds', operator: 'gt', value: NO_SIGNAL_SECONDS }],
-    isDefault: false,
-  },
-  {
-    stateName: 'No GPS',
-    stateColor: '#F59E0B', stateIcon: '📡', priority: 2, conditionLogic: 'AND',
-    conditions: [{ field: 'hasLocation', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Emergency',
-    stateColor: '#7C3AED', stateIcon: '🆘', priority: 3, conditionLogic: 'AND',
-    conditions: [{ field: 'emergency', operator: 'eq', value: true }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Overspeed',
-    stateColor: '#DC2626', stateIcon: '🏎️', priority: 4, conditionLogic: 'AND',
-    conditions: [{ field: 'speed', operator: 'gte', value: 80 }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Running',
-    stateColor: '#16A34A', stateIcon: '🟢', priority: 5, conditionLogic: 'AND',
-    conditions: [
-      { field: 'ignition', operator: 'eq',  value: true },
-      { field: 'speed',    operator: 'gte', value: 5 },
-    ],
-    isDefault: false,
-  },
-  {
-    stateName: 'Idle',
-    stateColor: '#D97706', stateIcon: '⏸️', priority: 6, conditionLogic: 'AND',
-    conditions: [
-      { field: 'ignition', operator: 'eq', value: true },
-      { field: 'speed',    operator: 'lt', value: 5 },
-    ],
-    isDefault: false,
-  },
-  {
-    stateName: 'Stopped',
-    stateColor: '#EF4444', stateIcon: '🔴', priority: 7, conditionLogic: 'AND',
-    conditions: [{ field: 'ignition', operator: 'eq', value: false }],
-    isDefault: false,
-  },
-  {
-    stateName: 'Unknown',
-    stateColor: '#94A3B8', stateIcon: '❓', priority: 99, conditionLogic: 'AND',
-    conditions: [], isDefault: true,
-  },
-];
+// All built-in device types share the same six-state spec defined above.
+// (Per-device differences — ignition source, capabilities — are handled
+// elsewhere in the packet pipeline, not here.)
+const GT06_DEFAULTS      = SHARED_DEFAULTS;
+const FMB125_DEFAULTS    = SHARED_DEFAULTS;
+const TELTONIKA_DEFAULTS = SHARED_DEFAULTS;
+const AIS140_DEFAULTS    = SHARED_DEFAULTS;
 
 const BUILT_INS = [
   {

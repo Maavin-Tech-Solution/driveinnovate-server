@@ -26,6 +26,8 @@ const MIGRATIONS = [
   { table: 'vehicle_device_states', column: 'last_external_voltage', ddl: 'DECIMAL(5,2) NULL COMMENT "Vehicle 12V supply V"' },
   { table: 'vehicle_device_states', column: 'last_gsm_signal',       ddl: 'TINYINT UNSIGNED NULL COMMENT "GSM signal strength"' },
   { table: 'vehicle_device_states', column: 'last_gps_packet_time',  ddl: 'DATETIME(6) NULL COMMENT "Time of last GPS-bearing packet"' },
+  { table: 'vehicle_device_states', column: 'speed_zero_since',      ddl: 'DATETIME(6) NULL COMMENT "When speed last became 0; cleared on speed>0. Drives Idle 4-min rule"' },
+  { table: 'vehicle_device_states', column: 'running_streak',        ddl: 'TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT "Consecutive packets with speed>5. Drives Running 3-packets rule"' },
 
   // ── trips ──────────────────────────────────────────────────────────────────
   { table: 'trips', column: 'status', ddl: "ENUM('in_progress','completed') NOT NULL DEFAULT 'completed' COMMENT \"Trip lifecycle state\"" },

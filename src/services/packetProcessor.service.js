@@ -469,6 +469,23 @@ async function processPacket(doc, deviceType, _state) {
     state.lastSatellites    = pkt.satellites    != null ? pkt.satellites    : state.lastSatellites;
     state.lastCourse        = pkt.course        != null ? pkt.course        : state.lastCourse;
     state.lastSpeed         = pkt.speed;
+    // ── State-machine duration trackers ───────────────────────────────────────
+    // speedZeroSince: anchored on the first packet where speed === 0; cleared
+    // the moment a non-zero packet arrives. Drives the Idle rule's 4-minute
+    // window via attachComprehensiveStatus → speedZeroSeconds.
+    if ((pkt.speed || 0) === 0) {
+      if (!state.speedZeroSince) state.speedZeroSince = pkt.timestamp;
+    } else {
+      state.speedZeroSince = null;
+    }
+    // runningStreak: count of consecutive packets with speed > 5 km/h. The
+    // Running rule requires 3 in a row to avoid flapping on momentary speed
+    // bumps. Capped at 255 to match the column's TINYINT UNSIGNED storage.
+    if ((pkt.speed || 0) > 5) {
+      state.runningStreak = Math.min(255, (state.runningStreak || 0) + 1);
+    } else {
+      state.runningStreak = 0;
+    }
     state.lastFuelLevel     = pkt.fuel          != null ? pkt.fuel          : state.lastFuelLevel;
     state.lastOdometerReading = pkt.odometer    != null ? pkt.odometer      : state.lastOdometerReading;
     state.lastBattery       = pkt.battery       != null ? pkt.battery       : state.lastBattery;
@@ -703,6 +720,8 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
       lastLng: null,
       lastGpsPacketTime: null,
       lastSpeed: null,
+      speedZeroSince: null,
+      runningStreak: 0,
     });
   }
 
