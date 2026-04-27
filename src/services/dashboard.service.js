@@ -2,8 +2,10 @@ const { Vehicle, Challan, RtoDetail, VehicleGroup, User } = require('../models')
 const { Op } = require('sequelize');
 const { Location } = require('../config/mongodb');
 
-const getStats = async (userId) => {
-  const vehicles = await Vehicle.findAll({ where: { clientId: userId } });
+const getStats = async (clientIds) => {
+  // Same network-aware semantics as getUserStats — accepts userId number or
+  // a full clientIds array. Counts roll up across the user's network.
+  const vehicles = await Vehicle.findAll({ where: { clientId: clientIds } });
   const vehicleIds = vehicles.map((v) => v.id);
 
   const [totalChallans, pendingChallans, challanAmountResult, vehicleRenewals] = await Promise.all([
@@ -32,8 +34,16 @@ const getStats = async (userId) => {
   };
 };
 
-const getUserStats = async (userId) => {
-  const vehicles = await Vehicle.findAll({ where: { clientId: userId }, attributes: ['id', 'status'] });
+/**
+ * @param {number|number[]} clientIds  — single user id OR full network array
+ *                                       (`[self, ...descendants]` from
+ *                                       resolveUserRole).  Passing the array
+ *                                       makes papa/dealer dashboards show
+ *                                       network-wide stats; for solo users it
+ *                                       degenerates to their own data.
+ */
+const getUserStats = async (clientIds) => {
+  const vehicles = await Vehicle.findAll({ where: { clientId: clientIds }, attributes: ['id', 'status'] });
   const vehicleIds = vehicles.map((v) => v.id);
 
   const activeVehicles   = vehicles.filter((v) => v.status === 'active').length;
@@ -75,12 +85,13 @@ const getUserStats = async (userId) => {
  * @param {number} speedThreshold - Speed threshold in km/h
  * @returns {Promise<Array>} Array of vehicles with overspeed details
  */
-const getOverspeedVehicles = async (userId, speedThreshold = 80) => {
+const getOverspeedVehicles = async (clientIds, speedThreshold = 80) => {
   try {
-    // Get user's active vehicles
-    const vehicles = await Vehicle.findAll({ 
-      where: { 
-        clientId: userId,
+    // Network-aware: clientIds is the full [self, ...descendants] array for
+    // papa/dealer accounts and a single-element array for solo users.
+    const vehicles = await Vehicle.findAll({
+      where: {
+        clientId: clientIds,
         status: 'active'
       },
       attributes: ['id', 'vehicleNumber', 'imei']

@@ -745,11 +745,14 @@ const attachComprehensiveStatus = async (vehicle) => {
   return { ...vehicleJson, deviceStatus };
 };
 
+// Accepts either a single client id (drilldown into one child) or an array
+// of ids (the full network array `[self, ...descendants]` for papa/dealer
+// dashboards). Sequelize treats array values as an IN clause.
 const getVehicles = async (clientId) => {
-  console.log('[GET_VEHICLES] Fetching vehicles for client:', clientId);
-  const vehicles = await Vehicle.findAll({ 
-    where: { clientId }, 
-    include: [{ model: RtoDetail, as: 'rtoDetail' }] 
+  console.log('[GET_VEHICLES] Fetching vehicles for client(s):', Array.isArray(clientId) ? `[${clientId.length} ids]` : clientId);
+  const vehicles = await Vehicle.findAll({
+    where: { clientId },
+    include: [{ model: RtoDetail, as: 'rtoDetail' }]
   });
   
   console.log(`[GET_VEHICLES] Found ${vehicles.length} vehicles, fetching comprehensive device status for each...`);

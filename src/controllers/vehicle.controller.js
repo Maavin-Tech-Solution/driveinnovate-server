@@ -2,18 +2,24 @@ const vehicleService = require('../services/vehicle.service');
 
 /**
  * GET /api/vehicles
- * Optional ?clientId=X — admin/papa/dealer can view a child client's fleet.
- * X must be in req.user.clientIds (the user's full descendant tree).
+ * Optional ?clientId=X — drilldown into a single child client's fleet.
+ *   X must be in req.user.clientIds (the user's full descendant tree).
+ * Otherwise returns vehicles for the user's whole network
+ *   (req.user.clientIds = [self, ...descendants] for papa/dealer; just [self]
+ *   for solo users — so behaviour is unchanged for non-network accounts).
  */
 const getVehicles = async (req, res) => {
   try {
-    let effectiveClientId = req.user.id;
+    let effectiveClientId;
     if (req.query.clientId) {
       const targetId = Number(req.query.clientId);
       if (!req.user.clientIds?.includes(targetId)) {
         return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
       }
       effectiveClientId = targetId;
+    } else {
+      // Default scope = the user's full network. Sequelize treats an array as IN.
+      effectiveClientId = req.user.clientIds || [req.user.id];
     }
     const vehicles = await vehicleService.getVehicles(effectiveClientId);
     return res.json({ success: true, data: vehicles });
