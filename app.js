@@ -54,10 +54,58 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // Routes
 app.use('/api', routes);
 
-// Health check
+// ─── Health check ─────────────────────────────────────────────────────────────
+// /health — quick liveness check (no auth required)
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', message: 'DriveInnovate Server is running', timestamp: new Date() });
+  const mongoState = mongoose.connection.readyState;
+  // 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
+  const mongoStateLabel = ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoState] || 'unknown';
+  res.json({
+    status: 'OK',
+    message: 'DriveInnovate Server is running',
+    timestamp: new Date(),
+    mongo: { readyState: mongoState, label: mongoStateLabel },
+  });
 });
+
+// /api/health/mongo — detailed MongoDB diagnostics (papa only)
+// Shows: connection state, change-stream collection names, and pending-write
+// buffer sizes per device server (the in-memory queues that absorb Atlas outages).
+app.get('/api/health/mongo', (req, res) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+  const mongoState = mongoose.connection.readyState;
+  const mongoStateLabel = ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoState] || 'unknown';
+  const healthy = mongoState === 1;
+
+  res.json({
+    success: true,
+    data: {
+      mongo: {
+        readyState:    mongoState,
+        label:         mongoStateLabel,
+        healthy,
+        checkedAt:     new Date().toISOString(),
+      },
+      changeStreams: _activeStreams.map(s => ({
+        collection: s.colName,
+        deviceType: s.deviceType,
+        alive:      s.alive,
+        startedAt:  s.startedAt,
+      })),
+      advice: healthy ? null : [
+        'MongoDB is not connected. Change streams and live packet processing are paused.',
+        'Packets from device TCP servers are being buffered in memory.',
+        'Processing will resume automatically when MongoDB reconnects.',
+        'Manually trigger /api/health/mongo again in 30s to check reconnect status.',
+      ],
+    },
+  });
+});
+
+// Registry updated by watchCollection so /api/health/mongo can report stream state.
+const _activeStreams = [];
 
 // Serve React build + SPA fallback (production only — skipped when dist doesn't exist in dev)
 const clientDist = path.join(__dirname, '../client/dist');
@@ -119,6 +167,11 @@ sequelize
       // Run stale-trip reconciliation every 10 minutes so trips orphaned by
       // server spin-down (Render free tier) get closed without needing a restart.
       setInterval(reconcileStaleTrips, 10 * 60 * 1000);
+      // Periodic catchup every 5 minutes: replays any MongoDB packets that
+      // arrived during Atlas reconnect windows without being processed by a
+      // change stream.  Combined with the stream-restart trigger above this
+      // ensures no packet is permanently missed due to Atlas M0 downtime.
+      setInterval(() => triggerCatchup('periodic 5-min sweep'), 5 * 60 * 1000);
     });
   })
   .catch((err) => {
@@ -191,11 +244,28 @@ async function startChangeStreams() {
   }
 }
 
+// Track the last time a catchup ran so we don't spam it on rapid stream restarts.
+let _lastCatchupAt = 0;
+const CATCHUP_COOLDOWN_MS = 2 * 60 * 1000; // at most once every 2 minutes
+
+function triggerCatchup(reason) {
+  const now = Date.now();
+  if (now - _lastCatchupAt < CATCHUP_COOLDOWN_MS) {
+    console.log(`[CatchUp] Skipped (cooldown active) — reason: ${reason}`);
+    return;
+  }
+  _lastCatchupAt = now;
+  console.log(`[CatchUp] Triggered — reason: ${reason}`);
+  catchUpMissedPackets().catch(err =>
+    console.error('[CatchUp] Error during triggered run:', err.message)
+  );
+}
+
 function watchCollection(colName, deviceType, retryMs = 5000) {
   let stream;
   try {
     const db = getMongoDb();
-    if (!db) return; // MongoDB not connected
+    if (!db) return;
 
     const col = db.collection(colName);
     stream = col.watch([{ $match: { operationType: 'insert' } }], {
@@ -215,26 +285,37 @@ function watchCollection(colName, deviceType, retryMs = 5000) {
     const scheduleRetry = (err) => {
       const wait = Math.min(retryMs * 2, 60000);
       console.warn(`[ChangeStream:${colName}] ${err.message} — retrying in ${wait / 1000}s`);
-      // Close cleanly before retry so the connection returns to the pool
       stream.close().catch(() => {});
-      setTimeout(() => watchCollection(colName, deviceType, wait), wait);
+      setTimeout(() => {
+        // After each stream restart, run a catchup to pick up any packets that
+        // arrived while the stream was down.  This is the main fix for the
+        // "trips vanish during Atlas reconnect" issue.
+        watchCollection(colName, deviceType, wait);
+        triggerCatchup(`${colName} stream restarted after: ${err.message}`);
+      }, wait);
     };
 
     stream.on('error', scheduleRetry);
 
-    // Atlas change streams can go 'closed' without emitting 'error' on network timeout
     stream.on('close', () => {
-      // Only retry if Mongoose is still connected (avoid retry storm on intentional shutdown)
       if (mongoose.connection.readyState === 1) {
         scheduleRetry(new Error('stream closed unexpectedly'));
       }
     });
 
+    const entry = { colName, deviceType, alive: true, startedAt: new Date().toISOString() };
+    const existing = _activeStreams.findIndex(s => s.colName === colName);
+    if (existing >= 0) _activeStreams[existing] = entry; else _activeStreams.push(entry);
+    stream.on('close', () => { const e = _activeStreams.find(s => s.colName === colName); if (e) e.alive = false; });
+    stream.on('error', () => { const e = _activeStreams.find(s => s.colName === colName); if (e) e.alive = false; });
     console.log(`✓ Change stream watching ${colName} (${deviceType})`);
   } catch (err) {
     console.warn(`[ChangeStream:${colName}] Failed to start:`, err.message);
     if (stream) stream.close().catch(() => {});
-    setTimeout(() => watchCollection(colName, deviceType, Math.min(retryMs * 2, 60000)), retryMs);
+    setTimeout(() => {
+      watchCollection(colName, deviceType, Math.min(retryMs * 2, 60000));
+      triggerCatchup(`${colName} stream failed to start: ${err.message}`);
+    }, retryMs);
   }
 }
 

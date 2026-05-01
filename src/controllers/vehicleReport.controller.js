@@ -330,6 +330,10 @@ exports.reprocess = async (req, res) => {
     }
     console.log(`[Reprocess] Request: vehicle=${req.params.id} from=${from.toISOString()} to=${to.toISOString()}`);
     const result = await reprocessVehicle(Number(req.params.id), { from, to });
+    // aborted=true means 0 packets found — data was preserved, surface the message.
+    if (result.aborted) {
+      return res.status(200).json({ success: false, data: result, message: result.message });
+    }
     res.json({ success: true, data: result });
   } catch (err) {
     console.error('[Reprocess] Error:', err);

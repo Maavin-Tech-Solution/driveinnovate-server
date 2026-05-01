@@ -728,23 +728,48 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
   // Invalidate vehicle cache so processPacket re-reads from DB
   invalidateVehicleCache(vehicle.imei);
 
-  // ── 2. Fetch packets from MongoDB (deterministic order) ─────────────────────
+  // ── 2. Count packets FIRST — abort if MongoDB has nothing ───────────────────
+  // IMPORTANT: step 1 (delete) must NOT run until we confirm packets exist.
+  // If Atlas is temporarily unavailable the query silently returns 0 documents,
+  // and the old code would wipe all trips then rebuild nothing — permanently
+  // deleting valid data.  We count first; only then do we destroy and rebuild.
   const mongoFilter = { imei: { $in: imeiVariants } };
   if (hasRange) {
     mongoFilter.timestamp = {};
     if (from) mongoFilter.timestamp.$gte = from;
     if (to)   mongoFilter.timestamp.$lte = to;
   }
+
+  const packetCount = await mongoDb
+    .collection(caps.mongoCollection)
+    .countDocuments(mongoFilter);
+
+  const rangeLabel = hasRange
+    ? ` [${from ? from.toISOString().slice(0,10) : '…'} → ${to ? to.toISOString().slice(0,10) : '…'}]`
+    : ' [ALL]';
+
+  console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packetCount} packets in ${caps.mongoCollection}${rangeLabel}`);
+
+  if (packetCount === 0) {
+    // Abort without touching any existing trips or sessions.
+    // This keeps data safe during Atlas connectivity issues.
+    const msg = hasRange
+      ? `No packets found in MongoDB for IMEI ${vehicle.imei} in the selected date range. ` +
+        `Existing trips preserved. Check MongoDB connectivity or try a wider date range.`
+      : `No packets found in MongoDB for IMEI ${vehicle.imei}. ` +
+        `Existing trips preserved. The device may not have sent data yet, or MongoDB may be temporarily unavailable.`;
+    console.warn(`[Reprocess] Aborting — ${msg}`);
+    return { vehicleId, processed: 0, tripsCreated: 0, aborted: true, message: msg };
+  }
+
+  // ── 3. Fetch full packet list (we confirmed they exist above) ───────────────
   const packets = await mongoDb
     .collection(caps.mongoCollection)
     .find(mongoFilter)
     .sort({ timestamp: 1, _id: 1 })
     .toArray();
 
-  const rangeLabel = hasRange
-    ? ` [${from ? from.toISOString().slice(0,10) : '…'} → ${to ? to.toISOString().slice(0,10) : '…'}]`
-    : ' [ALL]';
-  console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packets.length} packets in ${caps.mongoCollection}${rangeLabel}`);
+  console.log(`[Reprocess] ${packets.length} packets fetched — proceeding with wipe+rebuild`);
 
   // ── 3. Replay through processPacket (in-memory state) ───────────────────────
   // Pass the state instance through each processPacket call so it is read/written
@@ -798,7 +823,7 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
   const tripCount = await Trip.count({ where: { vehicleId } });
   console.log(`[Reprocess] Vehicle ${vehicleId} done — ${processed} packets → ${tripCount} trips`);
 
-  return { processed, tripsCreated: tripCount };
+  return { processed, tripsCreated: tripCount, aborted: false };
 }
 
 module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips, catchUpMissedPackets, reprocessVehicle };
