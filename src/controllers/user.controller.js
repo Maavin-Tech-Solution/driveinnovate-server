@@ -12,6 +12,15 @@ const getProfile = async (req, res) => {
   }
 };
 
+const getParentContact = async (req, res) => {
+  try {
+    const data = await userService.getParentContact(req.user.id);
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
 /**
  * PUT /api/users/me
  * Body: { name, phone }
@@ -205,4 +214,4 @@ const extendClientTrial = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree, upgradeClient, extendClientTrial };
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree, upgradeClient, extendClientTrial, getParentContact };

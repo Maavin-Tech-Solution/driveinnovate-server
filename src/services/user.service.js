@@ -13,6 +13,24 @@ const getProfile = async (userId) => {
   return user;
 };
 
+/**
+ * Return the parent (dealer/papa) contact details for a given user.
+ * Used by the client-side subscription-unavailable UI to show who to contact.
+ * Only name, email, and phone are returned — no sensitive data.
+ */
+const getParentContact = async (userId) => {
+  const user = await User.findByPk(userId, { attributes: ['parentId', 'name', 'email', 'phone'] });
+  if (!user) {
+    const err = new Error('User not found'); err.status = 404; throw err;
+  }
+  // If the user IS the root (parentId === 0 or null), return their own details
+  // so they always have a contact to display.
+  const parentId = user.parentId && Number(user.parentId) !== 0 ? user.parentId : user.id;
+  const parent = await User.findByPk(parentId, { attributes: ['id', 'name', 'email', 'phone'] });
+  if (!parent) return { name: null, email: null, phone: null };
+  return { name: parent.name, email: parent.email, phone: parent.phone };
+};
+
 const updateProfile = async (userId, { name, phone }) => {
   const user = await User.findByPk(userId);
   if (!user) {
@@ -343,6 +361,7 @@ const extendTrial = async (clientId, callerClientIds, newExpiresAt) => {
 
 module.exports = {
   getProfile,
+  getParentContact,
   updateProfile,
   updatePassword,
   updateNotifications,

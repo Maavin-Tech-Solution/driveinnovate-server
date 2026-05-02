@@ -31,10 +31,15 @@ const {
   VehicleEngineSession,
   VehicleFuelEvent,
   Trip,
+  Notification,
+  Geofence,
+  GeofenceAssignment,
+  VehicleGroupMember,
 } = require('../models');
 const { normalizePacket }  = require('./packetNormalizer.service');
 const { getCapabilities }  = require('../config/deviceCapabilities');
 const { getMongoDb }       = require('../config/mongodb');
+const { sendAlertEmail, buildAlertEmailHtml } = require('./email.service');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const TRIP_START_SPEED         = 5;     // km/h — must exceed to open a new trip
@@ -47,6 +52,142 @@ const TRIP_GPS_GAP_MS          = 5 * 60_000; // 5 min — auto-close trip if no 
 const MIN_TRIP_DURATION_SEC    = 30;    // trips shorter than this are noise (deleted in reprocess cleanup)
 const MIN_TRIP_DISTANCE_KM     = 0.05;  // trips shorter than 50 m are noise
 
+// ── Geofence position state ───────────────────────────────────────────────────
+// Tracks whether each vehicle was inside each of its geofences on the PREVIOUS
+// GPS packet.  Key: `${vehicleId}_${geofenceId}`, Value: boolean.
+// In-memory only — after server restart the first packet recalibrates state
+// without generating false alerts (we only fire on transitions, not first read).
+const _geoState = new Map();
+
+/**
+ * Haversine distance in metres (duplicated from geofence.service to avoid
+ * circular imports — keeps packetProcessor self-contained).
+ */
+const _haversineM = (lat1, lng1, lat2, lng2) => {
+  const R = 6_371_000;
+  const toR = d => d * Math.PI / 180;
+  const dLat = toR(lat2 - lat1);
+  const dLng = toR(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toR(lat1)) * Math.cos(toR(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+const _pointInPolygon = (lat, lng, polygon) => {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].lng, yi = polygon[i].lat;
+    const xj = polygon[j].lng, yj = polygon[j].lat;
+    if ((yi > lat) !== (yj > lat) && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+};
+
+const _isInsideGeo = (geo, lat, lng) => {
+  if (geo.type === 'CIRCULAR') {
+    return _haversineM(parseFloat(geo.centerLat), parseFloat(geo.centerLng), lat, lng) <= parseFloat(geo.radiusMeters);
+  }
+  if (geo.type === 'POLYGON' && geo.coordinates?.length >= 3) {
+    return _pointInPolygon(lat, lng, geo.coordinates);
+  }
+  return false;
+};
+
+/**
+ * Check whether the vehicle's new position crosses any of its assigned
+ * geofences and fire GEOFENCE_ENTRY / GEOFENCE_EXIT notifications.
+ * Called once per GPS-bearing packet after position is updated.
+ */
+async function checkGeofences(vehicle, lat, lng, pkt) {
+  if (!vehicle.clientId || !lat || !lng) return;
+
+  // Collect all geofence IDs assigned to this vehicle (direct + group-based)
+  const memberships = await VehicleGroupMember.findAll({ where: { vehicleId: vehicle.id }, attributes: ['groupId'] });
+  const groupIds = memberships.map(m => m.groupId);
+
+  const { Op } = require('sequelize');
+  const assignments = await GeofenceAssignment.findAll({
+    where: {
+      [Op.or]: [
+        { scope: 'VEHICLE', vehicleId: vehicle.id },
+        ...(groupIds.length ? [{ scope: 'GROUP', groupId: groupIds }] : []),
+      ],
+    },
+    attributes: ['geofenceId', 'alertOnEntry', 'alertOnExit'],
+  });
+
+  if (!assignments.length) return;
+
+  const geofenceIds = [...new Set(assignments.map(a => a.geofenceId))];
+  const geofences = await Geofence.findAll({
+    where: { id: geofenceIds, isActive: true, clientId: vehicle.clientId },
+    raw: true,
+  });
+
+  // Build a lookup: geofenceId → assignment settings
+  const assignMap = {};
+  assignments.forEach(a => {
+    if (!assignMap[a.geofenceId]) assignMap[a.geofenceId] = { alertOnEntry: false, alertOnExit: false };
+    if (a.alertOnEntry) assignMap[a.geofenceId].alertOnEntry = true;
+    if (a.alertOnExit)  assignMap[a.geofenceId].alertOnExit  = true;
+  });
+
+  for (const geo of geofences) {
+    const stateKey = `${vehicle.id}_${geo.id}`;
+    const wasInside  = _geoState.get(stateKey);  // undefined on first packet
+    const nowInside  = _isInsideGeo(geo, lat, lng);
+
+    // Update state
+    _geoState.set(stateKey, nowInside);
+
+    // Skip on first packet after restart (no previous state) — avoids false alerts
+    if (wasInside === undefined) continue;
+
+    const assign = assignMap[geo.id] || {};
+    let eventType = null;
+    if (!wasInside && nowInside  && assign.alertOnEntry) eventType = 'ENTRY';
+    if ( wasInside && !nowInside && assign.alertOnExit)  eventType = 'EXIT';
+    if (!eventType) continue;
+
+    const vehicleName = vehicle.vehicleNumber || vehicle.vehicleName || `Vehicle #${vehicle.id}`;
+    const title   = `Geofence ${eventType === 'ENTRY' ? 'Entry' : 'Exit'} — ${geo.name}`;
+    const message = `${vehicleName} ${eventType === 'ENTRY' ? 'entered' : 'exited'} geofence "${geo.name}" at ${new Date(pkt.timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}.`;
+
+    try {
+      const notif = await Notification.create({
+        clientId:    vehicle.clientId,
+        alertId:     null,
+        vehicleId:   vehicle.id,
+        title,
+        message,
+        alertType:   `GEOFENCE_${eventType}`,
+        isRead:      false,
+        emailSent:   false,
+        metadata:    { geofenceId: geo.id, geofenceName: geo.name, lat, lng, eventType },
+        triggeredAt: new Date(),
+      });
+
+      // Best-effort email (non-blocking)
+      const htmlBody = buildAlertEmailHtml({
+        alertName:     title,
+        alertType:     `GEOFENCE_${eventType}`,
+        vehicleNumber: vehicleName,
+        vehicleName:   vehicleName,
+        message,
+        triggeredAt:   notif.triggeredAt,
+        metadata:      { lat, lng, geofenceName: geo.name },
+      });
+      sendAlertEmail({ subject: `[DriveInnovate] ${title}`, htmlBody }).then(sent => {
+        if (sent) notif.update({ emailSent: true }).catch(() => {});
+      }).catch(() => {});
+
+      console.log(`[Geofence] ${eventType}: vehicle ${vehicle.id} — "${geo.name}"`);
+    } catch (err) {
+      console.error('[Geofence] Failed to create notification:', err.message);
+    }
+  }
+}
+
 // ── Vehicle lookup cache (imei → Vehicle row) ─────────────────────────────────
 const vehicleCache = new Map();
 
@@ -57,7 +198,7 @@ async function getVehicle(imei) {
   else candidates.push('0' + imei);
   const v = await Vehicle.findOne({
     where: { imei: candidates },
-    attributes: ['id', 'imei', 'deviceType', 'fuelFillThreshold'],
+    attributes: ['id', 'imei', 'clientId', 'deviceType', 'fuelFillThreshold'],
   });
   if (v) {
     vehicleCache.set(imei, v);
@@ -497,6 +638,15 @@ async function processPacket(doc, deviceType, _state) {
     state.currentSessionId  = state.currentSessionId || null;
     state.pendingTripEnd    = false;
     await state.save();
+
+    // ── Geofence entry/exit check (non-blocking) ────────────────────────────
+    // Only run when this packet has a valid GPS fix so we have a real position.
+    if (pkt.hasGps && pkt.lat && pkt.lng) {
+      checkGeofences(vehicle, pkt.lat, pkt.lng, pkt).catch(err =>
+        console.error('[Geofence] checkGeofences error:', err.message)
+      );
+    }
+
     return _state ? state : undefined;
 
   } catch (err) {

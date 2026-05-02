@@ -6,6 +6,9 @@ const validateConsumer = require('../middleware/validateConsumer');
 // GET /api/users/me - get current user profile
 router.get('/me', validateConsumer, userController.getProfile);
 
+// GET /api/users/me/parent - dealer/parent contact details for subscription gates
+router.get('/me/parent', validateConsumer, userController.getParentContact);
+
 // PUT /api/users/me - update profile
 router.put('/me', validateConsumer, userController.updateProfile);
 
