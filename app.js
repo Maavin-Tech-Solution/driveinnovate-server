@@ -43,6 +43,8 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
 
+
+
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions)); // handle preflight for all routes
 app.use(express.json());
@@ -66,6 +68,10 @@ app.get('/health', (req, res) => {
     timestamp: new Date(),
     mongo: { readyState: mongoState, label: mongoStateLabel },
   });
+});
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'build', 'index.html'));
 });
 
 // /api/health/mongo — detailed MongoDB diagnostics (papa only)
