@@ -36,6 +36,7 @@ const {
   GeofenceAssignment,
   VehicleGroupMember,
 } = require('../models');
+const { Op } = require('sequelize');
 const { normalizePacket }  = require('./packetNormalizer.service');
 const { getCapabilities }  = require('../config/deviceCapabilities');
 const { getMongoDb }       = require('../config/mongodb');
@@ -99,32 +100,55 @@ const _isInsideGeo = (geo, lat, lng) => {
  * Called once per GPS-bearing packet after position is updated.
  */
 async function checkGeofences(vehicle, lat, lng, pkt) {
-  if (!vehicle.clientId || !lat || !lng) return;
+  // ── Bug-guard: clientId missing means vehicle was cached before the field
+  // was added to the query.  Look it up fresh instead of silently bailing.
+  let clientId = vehicle.clientId;
+  if (!clientId) {
+    const fresh = await Vehicle.findByPk(vehicle.id, { attributes: ['clientId'] });
+    clientId = fresh?.clientId;
+    if (clientId) vehicle.clientId = clientId; // patch in-memory cache entry
+  }
+  if (!clientId || !lat || !lng) {
+    console.warn(`[Geofence] skip vehicle ${vehicle.id} — no clientId or coords`);
+    return;
+  }
 
-  // Collect all geofence IDs assigned to this vehicle (direct + group-based)
-  const memberships = await VehicleGroupMember.findAll({ where: { vehicleId: vehicle.id }, attributes: ['groupId'] });
+  // ── Direct vehicle assignments + group memberships ──
+  const memberships  = await VehicleGroupMember.findAll({
+    where: { vehicleId: vehicle.id }, attributes: ['groupId'],
+  });
   const groupIds = memberships.map(m => m.groupId);
 
-  const { Op } = require('sequelize');
+  const orClause = [{ scope: 'VEHICLE', vehicleId: vehicle.id }];
+  if (groupIds.length) orClause.push({ scope: 'GROUP', groupId: groupIds });
+
   const assignments = await GeofenceAssignment.findAll({
-    where: {
-      [Op.or]: [
-        { scope: 'VEHICLE', vehicleId: vehicle.id },
-        ...(groupIds.length ? [{ scope: 'GROUP', groupId: groupIds }] : []),
-      ],
-    },
+    where: { [Op.or]: orClause },
     attributes: ['geofenceId', 'alertOnEntry', 'alertOnExit'],
-  });
-
-  if (!assignments.length) return;
-
-  const geofenceIds = [...new Set(assignments.map(a => a.geofenceId))];
-  const geofences = await Geofence.findAll({
-    where: { id: geofenceIds, isActive: true, clientId: vehicle.clientId },
     raw: true,
   });
 
-  // Build a lookup: geofenceId → assignment settings
+  if (!assignments.length) {
+    console.log(`[Geofence] vehicle ${vehicle.id} — no geofence assignments`);
+    return;
+  }
+
+  const geofenceIds = [...new Set(assignments.map(a => a.geofenceId))];
+
+  // ── Fetch geofences WITHOUT raw:true so JSON columns (coordinates) are
+  //    properly deserialized.  raw:true returns coordinates as a plain string.
+  const geofences = await Geofence.findAll({
+    where: { id: geofenceIds, isActive: true },
+  });
+
+  if (!geofences.length) {
+    console.log(`[Geofence] vehicle ${vehicle.id} — no active geofences found for ids`, geofenceIds);
+    return;
+  }
+
+  console.log(`[Geofence] vehicle ${vehicle.id} lat=${lat} lng=${lng} — checking ${geofences.length} geofence(s)`);
+
+  // Build a lookup: geofenceId → alert flags
   const assignMap = {};
   assignments.forEach(a => {
     if (!assignMap[a.geofenceId]) assignMap[a.geofenceId] = { alertOnEntry: false, alertOnExit: false };
@@ -133,29 +157,41 @@ async function checkGeofences(vehicle, lat, lng, pkt) {
   });
 
   for (const geo of geofences) {
-    const stateKey = `${vehicle.id}_${geo.id}`;
-    const wasInside  = _geoState.get(stateKey);  // undefined on first packet
-    const nowInside  = _isInsideGeo(geo, lat, lng);
+    const geoData   = geo.toJSON ? geo.toJSON() : geo;
+    // Parse coordinates if stored as a string (defensive)
+    if (typeof geoData.coordinates === 'string') {
+      try { geoData.coordinates = JSON.parse(geoData.coordinates); } catch { geoData.coordinates = []; }
+    }
 
-    // Update state
+    const stateKey  = `${vehicle.id}_${geoData.id}`;
+    const wasInside = _geoState.get(stateKey); // undefined = first packet
+    const nowInside = _isInsideGeo(geoData, lat, lng);
+
+    console.log(`[Geofence] "${geoData.name}" wasInside=${wasInside} nowInside=${nowInside}`);
+
     _geoState.set(stateKey, nowInside);
 
-    // Skip on first packet after restart (no previous state) — avoids false alerts
+    // First packet after restart: initialise state, no alert (avoids false trigger)
     if (wasInside === undefined) continue;
 
-    const assign = assignMap[geo.id] || {};
-    let eventType = null;
+    const assign    = assignMap[geoData.id] || {};
+    let   eventType = null;
     if (!wasInside && nowInside  && assign.alertOnEntry) eventType = 'ENTRY';
     if ( wasInside && !nowInside && assign.alertOnExit)  eventType = 'EXIT';
     if (!eventType) continue;
 
-    const vehicleName = vehicle.vehicleNumber || vehicle.vehicleName || `Vehicle #${vehicle.id}`;
-    const title   = `Geofence ${eventType === 'ENTRY' ? 'Entry' : 'Exit'} — ${geo.name}`;
-    const message = `${vehicleName} ${eventType === 'ENTRY' ? 'entered' : 'exited'} geofence "${geo.name}" at ${new Date(pkt.timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}.`;
+    // vehicleNumber isn't in the packet-processor cache — fetch it once.
+    if (!vehicle._vehicleNumber) {
+      const vFull = await Vehicle.findByPk(vehicle.id, { attributes: ['vehicleNumber', 'vehicleName'] });
+      vehicle._vehicleNumber = vFull?.vehicleNumber || vFull?.vehicleName || `Vehicle #${vehicle.id}`;
+    }
+    const vehicleName = vehicle._vehicleNumber;
+    const title   = `Geofence ${eventType === 'ENTRY' ? 'Entry' : 'Exit'} — ${geoData.name}`;
+    const message = `${vehicleName} ${eventType === 'ENTRY' ? 'entered' : 'exited'} geofence "${geoData.name}" at ${new Date(pkt.timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}.`;
 
     try {
       const notif = await Notification.create({
-        clientId:    vehicle.clientId,
+        clientId:    clientId,
         alertId:     null,
         vehicleId:   vehicle.id,
         title,
@@ -163,11 +199,10 @@ async function checkGeofences(vehicle, lat, lng, pkt) {
         alertType:   `GEOFENCE_${eventType}`,
         isRead:      false,
         emailSent:   false,
-        metadata:    { geofenceId: geo.id, geofenceName: geo.name, lat, lng, eventType },
+        metadata:    { geofenceId: geoData.id, geofenceName: geoData.name, lat, lng, eventType },
         triggeredAt: new Date(),
       });
 
-      // Best-effort email (non-blocking)
       const htmlBody = buildAlertEmailHtml({
         alertName:     title,
         alertType:     `GEOFENCE_${eventType}`,
@@ -175,13 +210,13 @@ async function checkGeofences(vehicle, lat, lng, pkt) {
         vehicleName:   vehicleName,
         message,
         triggeredAt:   notif.triggeredAt,
-        metadata:      { lat, lng, geofenceName: geo.name },
+        metadata:      { lat, lng, geofenceName: geoData.name },
       });
-      sendAlertEmail({ subject: `[DriveInnovate] ${title}`, htmlBody }).then(sent => {
-        if (sent) notif.update({ emailSent: true }).catch(() => {});
-      }).catch(() => {});
+      sendAlertEmail({ subject: `[DriveInnovate] ${title}`, htmlBody })
+        .then(sent => { if (sent) notif.update({ emailSent: true }).catch(() => {}); })
+        .catch(() => {});
 
-      console.log(`[Geofence] ${eventType}: vehicle ${vehicle.id} — "${geo.name}"`);
+      console.log(`[Geofence] ✓ NOTIFICATION created: ${eventType} vehicle=${vehicle.id} geo="${geoData.name}"`);
     } catch (err) {
       console.error('[Geofence] Failed to create notification:', err.message);
     }
