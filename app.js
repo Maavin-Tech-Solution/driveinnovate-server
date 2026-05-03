@@ -50,6 +50,12 @@ app.options('*', cors(corsOptions)); // handle preflight for all routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Serve static files from React build
+app.use(express.static(path.join(__dirname, 'build')));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'build', 'index.html'));
+});
+
 // Serve uploaded support attachments as static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -70,9 +76,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'build', 'index.html'));
-});
 
 // /api/health/mongo — detailed MongoDB diagnostics (papa only)
 // Shows: connection state, change-stream collection names, and pending-write
