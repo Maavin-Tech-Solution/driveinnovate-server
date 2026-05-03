@@ -51,10 +51,10 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve static files from React build
-app.use(express.static(path.join(__dirname, 'build')));
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'build', 'index.html'));
-});
+// app.use(express.static(path.join(__dirname, 'build')));
+// // app.get('*', (req, res) => {
+// //   res.sendFile(path.join(__dirname, 'build', 'index.html'));
+// // });
 
 // Serve uploaded support attachments as static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
