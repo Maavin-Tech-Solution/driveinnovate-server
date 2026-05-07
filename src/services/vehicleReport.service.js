@@ -105,9 +105,17 @@ async function getSummary(vehicleId, from, to) {
   const vehicle = await getVehicle(vehicleId);
   if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
 
+  const tripWhere = {
+    [Op.or]: [
+      { vehicleId },
+      ...(vehicle.imei ? [{ imei: vehicle.imei }] : []),
+    ],
+    startTime: dateRange(from, to),
+  };
+
   const [trips, sessions, parkingStops, fuelFills, fuelDrains] = await Promise.all([
     Trip.findAll({
-      where: { vehicleId, startTime: dateRange(from, to) },
+      where: tripWhere,
       attributes: ['distance', 'duration', 'avgSpeed', 'maxSpeed', 'fuelConsumed'],
     }),
     VehicleEngineSession.findAll({
@@ -171,8 +179,16 @@ async function getDailyStats(vehicleId, from, to) {
   const vehicle = await getVehicle(vehicleId);
   if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
 
+  const tripWhere = {
+    [Op.or]: [
+      { vehicleId },
+      ...(vehicle.imei ? [{ imei: vehicle.imei }] : []),
+    ],
+    startTime: dateRange(from, to),
+  };
+
   const [trips, sessions, parkingStops, fills] = await Promise.all([
-    Trip.findAll({ where: { vehicleId, startTime: dateRange(from, to) }, order: [['startTime', 'ASC']] }),
+    Trip.findAll({ where: tripWhere, order: [['startTime', 'ASC']] }),
     VehicleEngineSession.findAll({ where: { vehicleId, startTime: dateRange(from, to), status: 'completed' }, order: [['startTime', 'ASC']] }),
     Stop.findAll({ where: overlappingStopsWhere(vehicleId, from, to), order: [['startTime', 'ASC']] }),
     VehicleFuelEvent.findAll({ where: { vehicleId, eventTime: dateRange(from, to), eventType: 'fill' }, order: [['eventTime', 'ASC']] }),
@@ -328,15 +344,26 @@ async function getTrips(vehicleId, from, to, limit = 200, offset = 0) {
   const vehicle = await getVehicle(vehicleId);
   if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
 
+  // Match by vehicleId OR imei so trips are found even when the vehicle was
+  // re-registered (new DB id, same IMEI) — avoids silently returning 0 rows
+  // for a device that has trips stored under an older vehicleId.
+  const tripWhere = {
+    [Op.or]: [
+      { vehicleId },
+      ...(vehicle.imei ? [{ imei: vehicle.imei }] : []),
+    ],
+    startTime: dateRange(from, to),
+  };
+
   const { count, rows: trips } = await Trip.findAndCountAll({
-    where: { vehicleId, startTime: dateRange(from, to) },
+    where: tripWhere,
     order: [['startTime', 'ASC']],
     limit,
     offset,
   });
 
   const all = await Trip.findAll({
-    where: { vehicleId, startTime: dateRange(from, to) },
+    where: tripWhere,
     attributes: ['distance', 'duration', 'maxSpeed', 'avgSpeed', 'fuelConsumed'],
   });
   const totalDist  = all.reduce((s, t) => s + parseFloat(t.distance || 0), 0);
