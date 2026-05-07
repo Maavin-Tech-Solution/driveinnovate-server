@@ -595,12 +595,22 @@ async function processPacket(doc, deviceType, _state) {
       if (state.currentTripId) {
         const trip = await Trip.findByPk(state.currentTripId);
         if (trip && trip.status === 'in_progress') {
-          const segKm      = jumped ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
-          const newDist    = parseFloat(trip.distance || 0) + segKm;
-          const newMax     = Math.max(parseFloat(trip.maxSpeed || 0), speed);
-          const durationSec = Math.max(0, Math.floor((now - new Date(trip.startTime).getTime()) / 1000));
-          const segSecs    = state.lastGpsPacketTime && pkt.lat
-            ? Math.max(0, Math.floor((now - new Date(state.lastGpsPacketTime).getTime()) / 1000)) : 0;
+          const segKm   = jumped ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
+          const newDist = parseFloat(trip.distance || 0) + segKm;
+          const newMax  = Math.max(parseFloat(trip.maxSpeed || 0), speed);
+
+          // Guard: GT06 (and other) devices buffer packets offline and re-send
+          // them on reconnect with their original timestamps.  These out-of-order
+          // packets arrive AFTER a newer live packet, so pkt.timestamp can be
+          // earlier than the trip's current endTime.  Never move endTime or
+          // duration backwards — only advance them when the packet is newer.
+          const packetIsForward = now >= new Date(trip.endTime).getTime();
+          const durationSec = packetIsForward
+            ? Math.max(0, Math.floor((now - new Date(trip.startTime).getTime()) / 1000))
+            : (trip.duration || 0);
+          const segSecs = packetIsForward && state.lastGpsPacketTime && pkt.lat
+            ? Math.max(0, Math.floor((now - new Date(state.lastGpsPacketTime).getTime()) / 1000))
+            : 0;
 
           // Build route (sample every ROUTE_SAMPLE_SECS)
           let route   = trip.routeData || [];
@@ -615,8 +625,8 @@ async function processPacket(doc, deviceType, _state) {
             ? movingPts.reduce((s, p) => s + p.spd, 0) / movingPts.length : 0;
 
           await trip.update({
-            endTime:            pkt.timestamp,
-            duration:           durationSec,
+            // Only advance endTime/duration — never move them backwards
+            ...(packetIsForward && { endTime: pkt.timestamp, duration: durationSec }),
             distance:           newDist,
             maxSpeed:           newMax,
             avgSpeed:           Math.round(avgSpeed * 100) / 100,

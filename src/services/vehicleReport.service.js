@@ -36,6 +36,25 @@ function dateRange(from, to) {
 }
 
 /**
+ * Returns the best WHERE clause for querying trips for a vehicle.
+ *
+ * Tries vehicleId first.  If no trips exist (vehicle was deleted and
+ * re-registered with a new id), falls back to matching by IMEI so that
+ * historical trips stored under the old vehicleId are still visible.
+ *
+ * Using fallback instead of Op.or avoids duplicates when both a current
+ * vehicleId record AND an IMEI record exist simultaneously (re-registration
+ * leaves old trips behind while new ones accumulate under the new id).
+ */
+async function resolveTripWhere(vehicleId, imei, from, to) {
+  const byId = { vehicleId, startTime: dateRange(from, to) };
+  if (!imei) return byId;
+  const count = await Trip.count({ where: byId });
+  if (count > 0) return byId;
+  return { imei, startTime: dateRange(from, to) };
+}
+
+/**
  * Find all PARKING stops that overlap the query window [from, to].
  * A stop overlaps if it started before `to` AND ended after `from`
  * (or is still open / endTime is null).
@@ -105,13 +124,7 @@ async function getSummary(vehicleId, from, to) {
   const vehicle = await getVehicle(vehicleId);
   if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
 
-  const tripWhere = {
-    [Op.or]: [
-      { vehicleId },
-      ...(vehicle.imei ? [{ imei: vehicle.imei }] : []),
-    ],
-    startTime: dateRange(from, to),
-  };
+  const tripWhere = await resolveTripWhere(vehicleId, vehicle.imei, from, to);
 
   const [trips, sessions, parkingStops, fuelFills, fuelDrains] = await Promise.all([
     Trip.findAll({
@@ -179,13 +192,7 @@ async function getDailyStats(vehicleId, from, to) {
   const vehicle = await getVehicle(vehicleId);
   if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
 
-  const tripWhere = {
-    [Op.or]: [
-      { vehicleId },
-      ...(vehicle.imei ? [{ imei: vehicle.imei }] : []),
-    ],
-    startTime: dateRange(from, to),
-  };
+  const tripWhere = await resolveTripWhere(vehicleId, vehicle.imei, from, to);
 
   const [trips, sessions, parkingStops, fills] = await Promise.all([
     Trip.findAll({ where: tripWhere, order: [['startTime', 'ASC']] }),
@@ -344,16 +351,7 @@ async function getTrips(vehicleId, from, to, limit = 200, offset = 0) {
   const vehicle = await getVehicle(vehicleId);
   if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
 
-  // Match by vehicleId OR imei so trips are found even when the vehicle was
-  // re-registered (new DB id, same IMEI) — avoids silently returning 0 rows
-  // for a device that has trips stored under an older vehicleId.
-  const tripWhere = {
-    [Op.or]: [
-      { vehicleId },
-      ...(vehicle.imei ? [{ imei: vehicle.imei }] : []),
-    ],
-    startTime: dateRange(from, to),
-  };
+  const tripWhere = await resolveTripWhere(vehicleId, vehicle.imei, from, to);
 
   const { count, rows: trips } = await Trip.findAndCountAll({
     where: tripWhere,
