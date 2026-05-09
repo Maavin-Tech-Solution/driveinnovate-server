@@ -359,9 +359,34 @@ async function processPacket(doc, deviceType, _state) {
     //   the trip or engine-session state machine.
     // ══════════════════════════════════════════════════════════════════════════
     if (pkt.isStatusOnly) {
-      // Still update non-GPS telemetry fields
+      // Update non-GPS telemetry fields.
       state.lastPacketTime = pkt.timestamp;
-      state.lastSeenAt     = new Date();   // real server UTC — see comment in main path
+      state.lastSeenAt     = new Date();
+
+      // GT06 STATUS packets (0x13) carry the ACC bit in the terminal-info byte
+      // (bit 3) which reliably reports ignition ON/OFF independently of GPS.
+      // The processor used to return here without updating state.engineOn, so
+      // ignition stayed stuck at the last LOCATION packet value even after the
+      // driver switched the engine off.  If the packet has a definite ignition
+      // reading (not null) update engineOn now — STATUS packets always use
+      // server time so they are never "buffered/historical", pkt.realTime is
+      // null (not false), so the live-packet guard below also allows the update.
+      if (pkt.ignition !== null && pkt.ignition !== undefined) {
+        const prevIgnition = state.engineOn;
+        // Use resolveIgnition so the same hysteresis rules apply (acc-strict vs
+        // acc-hysteresis).  Speed=0 for status-only packets — that's fine because
+        // the speed-based inference is only needed for LOCATION packets without an
+        // ACC wire; STATUS packets with a clear acc=false bit take the first branch.
+        const ignFromStatus = resolveIgnition(
+          { ...pkt, speed: 0 },
+          caps,
+          prevIgnition
+        );
+        if (pkt.realTime !== false) {
+          state.engineOn = ignFromStatus;
+        }
+      }
+
       if (pkt.fuel       != null) state.lastFuelLevel       = pkt.fuel;
       if (pkt.battery    != null) state.lastBattery          = pkt.battery;
       if (pkt.gsmSignal  != null) state.lastGsmSignal        = pkt.gsmSignal;
