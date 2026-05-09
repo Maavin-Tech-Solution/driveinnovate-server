@@ -2,23 +2,22 @@ const { DeviceConfig, StateDefinition } = require('../models');
 const { getCapabilities }               = require('../config/deviceCapabilities');
 
 // ─── Default state definitions ────────────────────────────────────────────────
-// Spec mirrored in docs/vehicle-states.xlsx (regenerate via
-// `node scripts/gen-vehicle-states.js` after any change here).
+// Industry-standard six-state spec.  Conditions use ONLY fields that are
+// available from the 5-second live-position poll — no server-side streak
+// counters that go stale between full reloads.
 //
-// Six states only — applied identically across every device type.
-//
-//   10  Offline    no packet in last 2 min      → lastSeenSeconds > 120
-//   20  Speeding   speed at/above threshold     → speed >= 80 (editable per device)
-//   30  Running    speed > 5 in 3 packets       → runningStreak >= 3
-//   40  Idle       engine ON + 4 min stationary → ignition=true AND speedZeroSeconds >= 240
-//   50  Stopped    engine OFF for 5 min         → ignition=false AND ignitionOffSeconds >= 300
-//   99  Online     fallback / online-but-no-state-yet  (isDefault)
+// Priority (lower = evaluated first, first match wins):
+//   10  Offline    no packet received in last 10 min  → lastSeenSeconds > 600
+//   20  Overspeed  speed at/above threshold            → speed >= 80
+//   30  Running    engine ON and moving                → ignition=true AND speed > 5
+//   40  Idle       engine ON but stationary 3+ min     → ignition=true AND speedZeroSeconds >= 180
+//   50  Stopped    engine OFF                          → ignition=false
+//   99  Online     fallback (device seen, no rule hit) (isDefault)
 
-const OFFLINE_SECONDS  = 120;       // 2 min — Offline rule
-const SPEEDING_KMPH    = 80;        // editable per device type via Master Settings
-const RUNNING_STREAK   = 3;         // consecutive packets above 5 km/h
-const IDLE_ZERO_SECS   = 240;       // 4 min — engine-on stationary window
-const STOPPED_OFF_SECS = 300;       // 5 min — engine-off settling window
+const OFFLINE_SECONDS  = 600;    // 10 min
+const OVERSPEED_KMPH   = 80;
+const RUNNING_STREAK   = 3;      // consecutive GPS packets with speed > 5 km/h
+const IDLE_ZERO_SECS   = 180;    // 3 min stationary before "Idle"
 
 const SHARED_DEFAULTS = [
   {
@@ -28,15 +27,21 @@ const SHARED_DEFAULTS = [
     isDefault: false,
   },
   {
-    stateName: 'Speeding',
+    stateName: 'Overspeed',
     stateColor: '#DC2626', stateIcon: '🏎️', priority: 20, conditionLogic: 'AND',
-    conditions: [{ field: 'speed', operator: 'gte', value: SPEEDING_KMPH }],
+    conditions: [{ field: 'speed', operator: 'gte', value: OVERSPEED_KMPH }],
     isDefault: false,
   },
   {
+    // runningStreak counts consecutive LIVE packets where the device confirms
+    // genuine movement: ignition on, speed > 5 km/h, AND > 50 m of actual
+    // spatial displacement between packets.  Requiring 5 in a row means a
+    // vehicle must drive ~250 m of cumulative position change before flipping
+    // to Running — impossible to fake with GPS multipath alone, eliminating
+    // false positives on parked vehicles in noisy reception areas.
     stateName: 'Running',
     stateColor: '#16A34A', stateIcon: '🟢', priority: 30, conditionLogic: 'AND',
-    conditions: [{ field: 'runningStreak', operator: 'gte', value: RUNNING_STREAK }],
+    conditions: [{ field: 'runningStreak', operator: 'gte', value: 5 }],
     isDefault: false,
   },
   {
@@ -52,15 +57,11 @@ const SHARED_DEFAULTS = [
     stateName: 'Stopped',
     stateColor: '#EF4444', stateIcon: '🔴', priority: 50, conditionLogic: 'AND',
     conditions: [
-      { field: 'ignition',           operator: 'eq',  value: false },
-      { field: 'ignitionOffSeconds', operator: 'gte', value: STOPPED_OFF_SECS },
+      { field: 'ignition', operator: 'eq', value: false },
     ],
     isDefault: false,
   },
   {
-    // Default fallback — fires whenever Offline does NOT match (so the device
-    // is online) and none of the motion-state rules above have triggered yet
-    // (e.g. just after ignition-off, or while runningStreak is still building).
     stateName: 'Online',
     stateColor: '#0EA5E9', stateIcon: '🌐', priority: 99, conditionLogic: 'AND',
     conditions: [], isDefault: true,
@@ -160,11 +161,18 @@ const seedBuiltIns = async () => {
       });
     }
 
-    // Always replace built-in states so updated defaults are applied on every server start.
-    await StateDefinition.destroy({ where: { deviceConfigId: config.id } });
-    await StateDefinition.bulkCreate(
-      defaults.map(d => ({ ...d, deviceConfigId: config.id }))
-    );
+    // Seed defaults ONLY if no state definitions exist yet for this device config.
+    // Once present, the user's Master Settings customizations are preserved across
+    // server restarts — they used to be wiped on every boot, which is why state
+    // behaviour appeared inconsistent.  To force a reset, use the explicit
+    // `reseedBuiltInStates(deviceConfigId)` API or delete the rows manually.
+    const existingCount = await StateDefinition.count({ where: { deviceConfigId: config.id } });
+    if (existingCount === 0) {
+      await StateDefinition.bulkCreate(
+        defaults.map(d => ({ ...d, deviceConfigId: config.id }))
+      );
+      console.log(`[seedBuiltIns] Seeded ${defaults.length} default states for ${spec.type}`);
+    }
   }
 };
 

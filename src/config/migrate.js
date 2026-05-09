@@ -28,6 +28,7 @@ const MIGRATIONS = [
   { table: 'vehicle_device_states', column: 'last_gps_packet_time',  ddl: 'DATETIME(6) NULL COMMENT "Time of last GPS-bearing packet"' },
   { table: 'vehicle_device_states', column: 'speed_zero_since',      ddl: 'DATETIME(6) NULL COMMENT "When speed last became 0; cleared on speed>0. Drives Idle 4-min rule"' },
   { table: 'vehicle_device_states', column: 'running_streak',        ddl: 'TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT "Consecutive packets with speed>5. Drives Running 3-packets rule"' },
+  { table: 'vehicle_device_states', column: 'last_seen_at',          ddl: 'DATETIME(6) NULL COMMENT "Real server UTC at last packet processing — never bumped by reconcile/migrations"' },
 
   // ── trips ──────────────────────────────────────────────────────────────────
   { table: 'trips', column: 'status', ddl: "ENUM('in_progress','completed') NOT NULL DEFAULT 'completed' COMMENT \"Trip lifecycle state\"" },
@@ -124,6 +125,26 @@ async function runMigrations() {
     console.log('[migrate] All columns up to date — nothing to add');
   } else {
     console.log(`[migrate] Done — added/patched ${added} column(s)`);
+  }
+
+  // Reset stale runningStreak counters at startup so any state corrupted by
+  // pre-fix code (e.g. GPS-noise inflated streaks) is cleared.  Only resets
+  // counters where the device hasn't sent a packet in the last 60 s — active
+  // vehicles keep their current streak so genuinely-running vehicles aren't
+  // briefly mis-classified.  Streaks rebuild correctly from the next packet.
+  try {
+    const [resetResult] = await sequelize.query(
+      `UPDATE vehicle_device_states
+         SET running_streak = 0
+       WHERE running_streak > 0
+         AND (last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL 60 SECOND)`
+    );
+    const affected = resetResult?.affectedRows ?? 0;
+    if (affected > 0) {
+      console.log(`[migrate] ✓ Cleared stale runningStreak on ${affected} vehicle state row(s)`);
+    }
+  } catch (err) {
+    console.warn('[migrate] runningStreak reset skipped:', err.message);
   }
 }
 

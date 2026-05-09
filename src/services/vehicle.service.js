@@ -700,14 +700,20 @@ const attachComprehensiveStatus = async (vehicle) => {
               timestamp:  state.lastPacketTime,
             },
             status:    { ignition: state.engineOn ?? false },
-            lastUpdate: state.lastPacketTime,
+            // updatedAt = real server UTC (always correct for state evaluation).
+            lastUpdate: state.updatedAt ?? state.lastPacketTime,
           },
         };
       }
     } else {
-      // Override ignition and lastUpdate (VehicleDeviceState is more accurate)
+      // Override ignition and lastUpdate (VehicleDeviceState is more accurate).
+      // Use state.updatedAt (real server UTC) for lastUpdate, NOT lastPacketTime —
+      // lastPacketTime is device-reported and can be hours off when GT06 devices
+      // send local time without timezone correction (GT06_TZ_OFFSET_MIN=0).  Using
+      // updatedAt ensures lastSeenSeconds is computed against real wall-clock.
       if (state.engineOn != null) deviceStatus.status.ignition = state.engineOn;
-      if (state.lastPacketTime)   deviceStatus.lastUpdate       = state.lastPacketTime;
+      if (state.updatedAt)        deviceStatus.lastUpdate       = state.updatedAt;
+      else if (state.lastPacketTime) deviceStatus.lastUpdate    = state.lastPacketTime;
 
       // Fill GPS coords from VehicleDeviceState when MongoDB had no valid GPS
       // (wrong deviceType → wrong collection queried, or no GPS-fix packets yet)
@@ -733,13 +739,32 @@ const attachComprehensiveStatus = async (vehicle) => {
   if (state && deviceStatus) {
     deviceStatus.status = deviceStatus.status || {};
     const now = Date.now();
+
+    // ALWAYS override deviceStatus.lastUpdate with state.lastSeenAt — the only
+    // field that exclusively reflects real packet processing in real server UTC.
+    // Do NOT fall back to updatedAt: it is bumped by reconcileStaleTrips every
+    // 10 min, which would artificially refresh "freshness" and cause Offline ↔
+    // Stopped flicker.  If lastSeenAt is null (vehicle hasn't sent a packet
+    // since the column was added), leave lastUpdate at whatever the MongoDB
+    // path produced — and if that's also null, lastSeenSeconds will be null
+    // (secsSince guards against null) so the Offline rule simply won't fire,
+    // letting the vehicle show its true engine state until a real packet arrives.
+    if (state.lastSeenAt) {
+      deviceStatus.lastUpdate = state.lastSeenAt;
+    }
     deviceStatus.status.ignitionOffSeconds = state.engineOffSince
       ? Math.floor((now - new Date(state.engineOffSince).getTime()) / 1000)
       : null;
     deviceStatus.status.speedZeroSeconds = state.speedZeroSince
       ? Math.floor((now - new Date(state.speedZeroSince).getTime()) / 1000)
       : null;
-    deviceStatus.status.runningStreak = state.runningStreak ?? 0;
+    // runningStreak: only meaningful if a recent real packet confirmed it.
+    // Use state.lastSeenAt strictly — no updatedAt fallback (reconcile bumps it).
+    // If lastSeenAt is null, treat as infinitely stale → streak forced to 0.
+    const streakAge = state.lastSeenAt
+      ? (Date.now() - new Date(state.lastSeenAt).getTime())
+      : Infinity;
+    deviceStatus.status.runningStreak = streakAge > 90_000 ? 0 : (state.runningStreak ?? 0);
   }
 
   return { ...vehicleJson, deviceStatus };
@@ -1074,17 +1099,23 @@ const getLivePositions = async (clientId, since) => {
   const vehicleIds = vehicles.map(v => v.id);
   if (!vehicleIds.length) return [];
 
-  // When `since` is provided, only fetch states that changed since then.
-  // This means unchanged vehicles are skipped entirely — client keeps their last known position.
+  // When `since` is provided, only fetch states whose lastSeenAt advanced
+  // since then.  Filtering by lastSeenAt (real packet processing time) instead
+  // of updatedAt means reconcileStaleTrips and other background updates do NOT
+  // bring an offline vehicle back into the live poll — only a real packet does.
   const stateWhere = { vehicleId: vehicleIds };
   if (since) {
     const sinceDate = new Date(since);
-    if (!isNaN(sinceDate)) stateWhere.lastPacketTime = { [Op.gt]: sinceDate };
+    if (!isNaN(sinceDate)) stateWhere.lastSeenAt = { [Op.gt]: sinceDate };
   }
 
   const states = await VehicleDeviceState.findAll({
     where: stateWhere,
-    attributes: ['vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn', 'lastPacketTime'],
+    attributes: [
+      'vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn',
+      'lastPacketTime', 'updatedAt', 'lastSeenAt',
+      'speedZeroSince', 'engineOffSince', 'runningStreak',
+    ],
   });
 
   // Build a lookup of vehicle metadata
@@ -1102,7 +1133,17 @@ const getLivePositions = async (clientId, since) => {
       lng: s.lastLng ? parseFloat(s.lastLng) : null,
       speed: s.lastSpeed ?? 0,
       engineOn: s.engineOn ?? false,
-      lastPacketTime: s.lastPacketTime ?? null,
+      lastPacketTime:   s.lastPacketTime ?? null,
+      // lastSeenAt: real server UTC of last packet processing — strictly this,
+      // no updatedAt fallback (reconcile bumps it artificially).
+      lastSeenAt:       s.lastSeenAt ?? null,
+      updatedAt:        s.updatedAt ?? null,
+      speedZeroSince:   s.speedZeroSince ?? null,
+      engineOffSince:   s.engineOffSince ?? null,
+      runningStreak:    (() => {
+        const age = s.lastSeenAt ? (Date.now() - new Date(s.lastSeenAt).getTime()) : Infinity;
+        return age > 90_000 ? 0 : (s.runningStreak ?? 0);
+      })(),
     };
   }).filter(Boolean);
 };

@@ -105,6 +105,13 @@ function normalizeGT06(doc) {
     satellites:  doc.satellites != null ? parseInt(doc.satellites, 10) : null,
     gpsFixed:    doc.gpsFixed !== undefined ? !!doc.gpsFixed : (hasGps ? true : null),
 
+    // realTime: bit 15 of course-status word.
+    // true  = packet generated and sent live (device is online right now).
+    // false = buffered/historical packet being replayed after reconnect.
+    // null  = non-GPS packet types (STATUS 0x13, HEARTBEAT 0x23) that don't
+    //         carry this bit — treat as live so they don't block streak resets.
+    realTime: doc.realTime !== undefined ? !!doc.realTime : null,
+
     ignition,
 
     fuel:            null,

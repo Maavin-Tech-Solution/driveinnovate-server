@@ -278,12 +278,25 @@ function resolveIgnition(pkt, caps, prevIgnition) {
   if (caps.ignitionSource === 'ignition-io' || caps.ignitionSource === 'acc-strict') {
     return pkt.ignition !== null ? pkt.ignition : prevIgnition;
   }
-  // acc-hysteresis fallback (GT06 and generics)
+
+  // acc-hysteresis (GT06 and generics):
+  // ─ When the ACC bit is present and explicitly false, TRUST it — never let
+  //   GPS speed noise override a hard ignition-OFF signal.  A GT06 parked in
+  //   poor satellite conditions can emit a single packet with speed=6 km/h
+  //   while the ACC bit correctly reads 0 (engine off).  The old code returned
+  //   true for that packet, locking engineOn=true in the DB until the next
+  //   clean acc=false+speed=0 packet arrived.
+  // ─ Only use speed as a positive signal when acc is absent/null (devices
+  //   that don't expose an ACC pin or wired without one).
   const speed = pkt.speed || 0;
   const acc   = pkt.ignition;
-  if (acc === true  || speed >= 5)            return true;
-  if (acc === false && speed === 0)           return false;
-  return prevIgnition; // hold — ambiguous range
+
+  if (acc === true)                 return true;   // ACC on → definitely running
+  if (acc === false)                return false;  // ACC off → trust it regardless of speed
+  // acc is null (no ignition signal from device)
+  if (speed >= 5)                   return true;   // clearly moving → infer engine on
+  if (speed === 0 && prevIgnition)  return false;  // stopped after moving → engine off
+  return prevIgnition;                             // hold last known state
 }
 
 // ── GPS jump detection ────────────────────────────────────────────────────────
@@ -348,6 +361,7 @@ async function processPacket(doc, deviceType, _state) {
     if (pkt.isStatusOnly) {
       // Still update non-GPS telemetry fields
       state.lastPacketTime = pkt.timestamp;
+      state.lastSeenAt     = new Date();   // real server UTC — see comment in main path
       if (pkt.fuel       != null) state.lastFuelLevel       = pkt.fuel;
       if (pkt.battery    != null) state.lastBattery          = pkt.battery;
       if (pkt.gsmSignal  != null) state.lastGsmSignal        = pkt.gsmSignal;
@@ -410,9 +424,20 @@ async function processPacket(doc, deviceType, _state) {
       pkt.lat, pkt.lng, now
     );
 
+    // Out-of-order guard — this GPS packet's timestamp is older than the last
+    // GPS packet we already processed.  isGpsJump() returns false for these
+    // (segMs <= 0 bypass) so they slip through the jump filter and the haversine
+    // distance from the current live position to the stale position gets added to
+    // the trip, inflating it by hundreds of km.  Also state.lastLat/Lng must NOT
+    // be overwritten with the old position or the NEXT in-order packet will
+    // compute a spuriously large segment from the wrong origin.
+    const isOutOfOrder = pkt.hasGps
+      && !!state.lastGpsPacketTime
+      && now < new Date(state.lastGpsPacketTime).getTime();
+
     console.log(
       `[PP] vid=${vehicleId} ign=${ignitionOn} spd=${speed} ` +
-      `trip=${state.currentTripId || '-'} jump=${jumped} ts=${pkt.timestamp.toISOString()}`
+      `trip=${state.currentTripId || '-'} jump=${jumped} oor=${isOutOfOrder} ts=${pkt.timestamp.toISOString()}`
     );
 
     // ── Fuel event detection ───────────────────────────────────────────────────
@@ -469,9 +494,9 @@ async function processPacket(doc, deviceType, _state) {
 
     } else if (ignitionOn && prevIgnition && state.currentSessionId) {
       // Engine still ON — accumulate session distance/time
-      const segKm   = jumped ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
+      const segKm   = (jumped || isOutOfOrder) ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
       const isDriving = speed >= DRIVE_SPEED_THRESH;
-      const segSecs   = state.lastGpsPacketTime && pkt.lat
+      const segSecs   = (!isOutOfOrder && state.lastGpsPacketTime && pkt.lat)
         ? Math.max(0, Math.floor((now - new Date(state.lastGpsPacketTime).getTime()) / 1000)) : 0;
       if (segKm > 0 || segSecs > 0) {
         await VehicleEngineSession.increment(
@@ -595,16 +620,15 @@ async function processPacket(doc, deviceType, _state) {
       if (state.currentTripId) {
         const trip = await Trip.findByPk(state.currentTripId);
         if (trip && trip.status === 'in_progress') {
-          const segKm   = jumped ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
+          // Never accumulate distance or time from out-of-order packets —
+          // they bypass isGpsJump (segMs ≤ 0) and would add the full haversine
+          // distance from the current live position back to the stale position,
+          // inflating trip distance by hundreds of km.
+          const segKm   = (jumped || isOutOfOrder) ? 0 : haversine(state.lastLat, state.lastLng, pkt.lat, pkt.lng);
           const newDist = parseFloat(trip.distance || 0) + segKm;
-          const newMax  = Math.max(parseFloat(trip.maxSpeed || 0), speed);
+          const newMax  = isOutOfOrder ? parseFloat(trip.maxSpeed || 0) : Math.max(parseFloat(trip.maxSpeed || 0), speed);
 
-          // Guard: GT06 (and other) devices buffer packets offline and re-send
-          // them on reconnect with their original timestamps.  These out-of-order
-          // packets arrive AFTER a newer live packet, so pkt.timestamp can be
-          // earlier than the trip's current endTime.  Never move endTime or
-          // duration backwards — only advance them when the packet is newer.
-          const packetIsForward = now >= new Date(trip.endTime).getTime();
+          const packetIsForward = !isOutOfOrder && now >= new Date(trip.endTime).getTime();
           const durationSec = packetIsForward
             ? Math.max(0, Math.floor((now - new Date(trip.startTime).getTime()) / 1000))
             : (trip.duration || 0);
@@ -647,30 +671,80 @@ async function processPacket(doc, deviceType, _state) {
     }
 
     // ── Persist live device state ──────────────────────────────────────────────
-    state.engineOn          = ignitionOn;
+    // Only update engineOn from live packets — buffered/historical GT06 packets
+    // (realTime=false) must not overwrite the current ignition state, since they
+    // replay old engine-on readings onto a vehicle that may now be parked.
+    if (pkt.realTime !== false) {
+      state.engineOn = ignitionOn;
+    }
     // engineOffSince is managed in the trip logic above — don't overwrite here
-    state.lastLat           = jumped ? state.lastLat : (pkt.lat  || state.lastLat);
-    state.lastLng           = jumped ? state.lastLng : (pkt.lng  || state.lastLng);
+
+    // Capture previous GPS position BEFORE advancing state — needed for the
+    // displacement-based runningStreak check further down.
+    const prevLat = parseFloat(state.lastLat) || null;
+    const prevLng = parseFloat(state.lastLng) || null;
+
+    // Positional state must only advance forward in time.  An out-of-order packet
+    // must not overwrite lastLat/Lng/lastGpsPacketTime — doing so would corrupt
+    // the origin point used by the next in-order packet's haversine calculation.
+    if (!isOutOfOrder) {
+      state.lastLat           = jumped ? state.lastLat : (pkt.lat  || state.lastLat);
+      state.lastLng           = jumped ? state.lastLng : (pkt.lng  || state.lastLng);
+      state.lastGpsPacketTime = pkt.hasGps ? pkt.timestamp : state.lastGpsPacketTime;
+    }
+
     state.lastAltitude      = pkt.altitude      != null ? pkt.altitude      : state.lastAltitude;
     state.lastSatellites    = pkt.satellites    != null ? pkt.satellites    : state.lastSatellites;
     state.lastCourse        = pkt.course        != null ? pkt.course        : state.lastCourse;
     state.lastSpeed         = pkt.speed;
+
     // ── State-machine duration trackers ───────────────────────────────────────
-    // speedZeroSince: anchored on the first packet where speed === 0; cleared
-    // the moment a non-zero packet arrives. Drives the Idle rule's 4-minute
-    // window via attachComprehensiveStatus → speedZeroSeconds.
-    if ((pkt.speed || 0) === 0) {
-      if (!state.speedZeroSince) state.speedZeroSince = pkt.timestamp;
-    } else {
-      state.speedZeroSince = null;
-    }
-    // runningStreak: count of consecutive packets with speed > 5 km/h. The
-    // Running rule requires 3 in a row to avoid flapping on momentary speed
-    // bumps. Capped at 255 to match the column's TINYINT UNSIGNED storage.
-    if ((pkt.speed || 0) > 5) {
-      state.runningStreak = Math.min(255, (state.runningStreak || 0) + 1);
-    } else {
-      state.runningStreak = 0;
+    if (!isOutOfOrder) {
+      // speedZeroSince: anchored on the first speed=0 packet; cleared the
+      // moment the vehicle moves again.  Drives the Idle rule.
+      if ((pkt.speed || 0) === 0) {
+        if (!state.speedZeroSince) state.speedZeroSince = pkt.timestamp;
+      } else {
+        state.speedZeroSince = null;
+      }
+
+      // runningStreak: consecutive live packets that confirm genuine movement.
+      //
+      // Four guards working together:
+      //
+      // 1. ignitionOn         — engine must be on (acc=false override fixed in resolveIgnition)
+      // 2. realTime !== false — only live packets count; buffered reconnect-burst
+      //                         packets reset the streak to 0
+      // 3. reported speed > 5 — device's GPS speed reading must clear threshold
+      // 4. IMPLIED speed > 5  — displacement / packet-interval must clear 5 km/h.
+      //
+      // Guard #4 is the critical filter for parked vehicles with sparse packet
+      // intervals.  A fixed displacement threshold (e.g. > 50 m) is meaningless
+      // without knowing the time gap: 50 m over 30 s = 6 km/h (real movement),
+      // but 50 m over 5 min = 0.6 km/h (just GPS drift on a stationary vehicle).
+      // Computing implied speed from haversine distance / segment duration normalises
+      // the check across any packet rate.  Packets > 1 hour apart are skipped so a
+      // long offline gap doesn't artificially inflate the implied speed.
+      const displacement = (!jumped && prevLat && prevLng && pkt.lat && pkt.lng)
+        ? haversine(prevLat, prevLng, pkt.lat, pkt.lng)
+        : null;
+      const segMs = state.lastGpsPacketTime
+        ? (now - new Date(state.lastGpsPacketTime).getTime())
+        : 0;
+      const impliedKph = (displacement !== null && segMs > 0 && segMs < 3_600_000)
+        ? (displacement * 3_600_000 / segMs)
+        : 0;
+      const genuinelyMoving = ignitionOn
+        && (pkt.speed || 0) > 5
+        && pkt.realTime !== false
+        && displacement !== null
+        && impliedKph > 5;
+
+      if (genuinelyMoving) {
+        state.runningStreak = Math.min(255, (state.runningStreak || 0) + 1);
+      } else {
+        state.runningStreak = 0;
+      }
     }
     state.lastFuelLevel     = pkt.fuel          != null ? pkt.fuel          : state.lastFuelLevel;
     state.lastOdometerReading = pkt.odometer    != null ? pkt.odometer      : state.lastOdometerReading;
@@ -678,7 +752,11 @@ async function processPacket(doc, deviceType, _state) {
     state.lastExternalVoltage = pkt.externalVoltage != null ? pkt.externalVoltage : state.lastExternalVoltage;
     state.lastGsmSignal     = pkt.gsmSignal     != null ? pkt.gsmSignal     : state.lastGsmSignal;
     state.lastPacketTime    = pkt.timestamp;
-    state.lastGpsPacketTime = pkt.hasGps ? pkt.timestamp : state.lastGpsPacketTime;
+    // lastSeenAt = real server wall-clock at packet-processing time.
+    // This is the authoritative field for "when did we last hear from this
+    // device".  Unlike updatedAt it is NOT bumped by reconcileStaleTrips.
+    // Unlike lastPacketTime it is NOT subject to device-clock timezone errors.
+    state.lastSeenAt        = new Date();
     state.currentTripId     = state.currentTripId    || null;
     state.currentSessionId  = state.currentSessionId || null;
     state.pendingTripEnd    = false;
@@ -885,7 +963,46 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
 
   const hasRange = from || to;
 
-  // ── 1. Wipe existing computed data (scoped to date range if provided) ───────
+  const mongoFilter = { imei: { $in: imeiVariants } };
+  if (hasRange) {
+    mongoFilter.timestamp = {};
+    if (from) mongoFilter.timestamp.$gte = from;
+    if (to)   mongoFilter.timestamp.$lte = to;
+  }
+
+  const rangeLabel = hasRange
+    ? ` [${from ? from.toISOString().slice(0,10) : '…'} → ${to ? to.toISOString().slice(0,10) : '…'}]`
+    : ' [ALL]';
+
+  // ── 1. Confirm packets exist BEFORE touching any SQL data ────────────────────
+  // If Atlas is temporarily unavailable, countDocuments returns 0 — we must not
+  // wipe trips and then rebuild nothing.  Always count first, abort if empty.
+  const packetCount = await mongoDb
+    .collection(caps.mongoCollection)
+    .countDocuments(mongoFilter);
+
+  console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packetCount} packets in ${caps.mongoCollection}${rangeLabel}`);
+
+  if (packetCount === 0) {
+    const msg = hasRange
+      ? `No packets found in MongoDB for IMEI ${vehicle.imei} in the selected date range. ` +
+        `Existing trips preserved. Check MongoDB connectivity or try a wider date range.`
+      : `No packets found in MongoDB for IMEI ${vehicle.imei}. ` +
+        `Existing trips preserved. The device may not have sent data yet, or MongoDB may be temporarily unavailable.`;
+    console.warn(`[Reprocess] Aborting — ${msg}`);
+    return { vehicleId, processed: 0, tripsCreated: 0, aborted: true, message: msg };
+  }
+
+  // ── 2. Fetch full packet list ────────────────────────────────────────────────
+  const packets = await mongoDb
+    .collection(caps.mongoCollection)
+    .find(mongoFilter)
+    .sort({ timestamp: 1, _id: 1 })
+    .toArray();
+
+  console.log(`[Reprocess] ${packets.length} packets fetched — proceeding with wipe+rebuild`);
+
+  // ── 3. Wipe existing computed data (packets confirmed above) ─────────────────
   const tripWhere = { vehicleId };
   const sessionWhere = { vehicleId };
   const fuelWhere = { vehicleId };
@@ -922,49 +1039,6 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
 
   // Invalidate vehicle cache so processPacket re-reads from DB
   invalidateVehicleCache(vehicle.imei);
-
-  // ── 2. Count packets FIRST — abort if MongoDB has nothing ───────────────────
-  // IMPORTANT: step 1 (delete) must NOT run until we confirm packets exist.
-  // If Atlas is temporarily unavailable the query silently returns 0 documents,
-  // and the old code would wipe all trips then rebuild nothing — permanently
-  // deleting valid data.  We count first; only then do we destroy and rebuild.
-  const mongoFilter = { imei: { $in: imeiVariants } };
-  if (hasRange) {
-    mongoFilter.timestamp = {};
-    if (from) mongoFilter.timestamp.$gte = from;
-    if (to)   mongoFilter.timestamp.$lte = to;
-  }
-
-  const packetCount = await mongoDb
-    .collection(caps.mongoCollection)
-    .countDocuments(mongoFilter);
-
-  const rangeLabel = hasRange
-    ? ` [${from ? from.toISOString().slice(0,10) : '…'} → ${to ? to.toISOString().slice(0,10) : '…'}]`
-    : ' [ALL]';
-
-  console.log(`[Reprocess] Vehicle ${vehicleId} (${vehicle.imei}): ${packetCount} packets in ${caps.mongoCollection}${rangeLabel}`);
-
-  if (packetCount === 0) {
-    // Abort without touching any existing trips or sessions.
-    // This keeps data safe during Atlas connectivity issues.
-    const msg = hasRange
-      ? `No packets found in MongoDB for IMEI ${vehicle.imei} in the selected date range. ` +
-        `Existing trips preserved. Check MongoDB connectivity or try a wider date range.`
-      : `No packets found in MongoDB for IMEI ${vehicle.imei}. ` +
-        `Existing trips preserved. The device may not have sent data yet, or MongoDB may be temporarily unavailable.`;
-    console.warn(`[Reprocess] Aborting — ${msg}`);
-    return { vehicleId, processed: 0, tripsCreated: 0, aborted: true, message: msg };
-  }
-
-  // ── 3. Fetch full packet list (we confirmed they exist above) ───────────────
-  const packets = await mongoDb
-    .collection(caps.mongoCollection)
-    .find(mongoFilter)
-    .sort({ timestamp: 1, _id: 1 })
-    .toArray();
-
-  console.log(`[Reprocess] ${packets.length} packets fetched — proceeding with wipe+rebuild`);
 
   // ── 3. Replay through processPacket (in-memory state) ───────────────────────
   // Pass the state instance through each processPacket call so it is read/written

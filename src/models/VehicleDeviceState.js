@@ -106,6 +106,16 @@ const VehicleDeviceState = sequelize.define('VehicleDeviceState', {
   // ── Packet timing ────────────────────────────────────────────────────────
   lastPacketTime: {
     type: DataTypes.DATE, allowNull: true, field: 'last_packet_time',
+    comment: 'Device-reported timestamp of last packet (may have wrong timezone for GT06)',
+  },
+  // Server wall-clock time when the last packet was actually processed by the
+  // packet pipeline.  Distinct from updatedAt (which is bumped by any state
+  // mutation including reconcileStaleTrips) and from lastPacketTime (device
+  // time, possibly wrong timezone).  This is the single authoritative field
+  // for "when did we last hear from this device?" used by lastSeenSeconds.
+  lastSeenAt: {
+    type: DataTypes.DATE, allowNull: true, field: 'last_seen_at',
+    comment: 'Real server UTC at last packet processing — never bumped by reconcile/migrations',
   },
   lastGpsPacketTime: {
     type: DataTypes.DATE, allowNull: true, field: 'last_gps_packet_time',
