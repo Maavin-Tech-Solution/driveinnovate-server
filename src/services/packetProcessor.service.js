@@ -364,25 +364,27 @@ async function processPacket(doc, deviceType, _state) {
       state.lastSeenAt     = new Date();
 
       // GT06 STATUS packets (0x13) carry the ACC bit in the terminal-info byte
-      // (bit 3) which reliably reports ignition ON/OFF independently of GPS.
-      // The processor used to return here without updating state.engineOn, so
-      // ignition stayed stuck at the last LOCATION packet value even after the
-      // driver switched the engine off.  If the packet has a definite ignition
-      // reading (not null) update engineOn now — STATUS packets always use
-      // server time so they are never "buffered/historical", pkt.realTime is
-      // null (not false), so the live-packet guard below also allows the update.
+      // (bit 3).  We use this to detect engine-off when no GPS-fixed LOCATION
+      // packets are arriving.  However, the terminal-info ACC bit and the
+      // course-status ACC bit (bit 10, used in LOCATION packets) can disagree on
+      // some GT06 firmware/wiring combinations — a vehicle actively moving with
+      // GPS-confirmed runningStreak > 0 must not have its engineOn overridden to
+      // false by a STATUS packet whose acc bit reads 0 due to hardware quirks.
+      //
+      // Rule: STATUS acc=false is only trusted when the vehicle is NOT moving.
+      //       STATUS acc=true is always trusted (safe — can't falsely show engine on
+      //       when GPS motion already confirms it).
       if (pkt.ignition !== null && pkt.ignition !== undefined) {
         const prevIgnition = state.engineOn;
-        // Use resolveIgnition so the same hysteresis rules apply (acc-strict vs
-        // acc-hysteresis).  Speed=0 for status-only packets — that's fine because
-        // the speed-based inference is only needed for LOCATION packets without an
-        // ACC wire; STATUS packets with a clear acc=false bit take the first branch.
         const ignFromStatus = resolveIgnition(
           { ...pkt, speed: 0 },
           caps,
           prevIgnition
         );
-        if (pkt.realTime !== false) {
+        const vehicleIsMoving = (state.runningStreak || 0) > 0;
+        if (ignFromStatus === true || !vehicleIsMoving) {
+          // Apply update: engine turning ON → always trust.
+          // Engine turning OFF → only trust when GPS motion confirms vehicle stopped.
           state.engineOn = ignFromStatus;
         }
       }
@@ -736,29 +738,26 @@ async function processPacket(doc, deviceType, _state) {
         state.speedZeroSince = null;
       }
 
-      // runningStreak: consecutive live packets that confirm genuine movement.
+      // runningStreak: consecutive packets that confirm genuine movement.
       //
-      // Four guards working together:
+      // Guards:
+      // 1. ignitionOn       — engine must be on
+      // 2. speed > 5        — device GPS speed above threshold
+      // 3. impliedKph > 5   — haversine / inter-packet time must exceed 5 km/h.
+      //    This is the key filter: a parked vehicle can show GPS drift of 50 m
+      //    but over a long inter-packet gap that implies only ~0.6 km/h — not
+      //    movement.  At 30 km/h with 30-second packets, displacement is ~250 m
+      //    → impliedKph = 30. Packets > 1 hour apart are skipped (offline gap).
       //
-      // 1. ignitionOn         — engine must be on (acc=false override fixed in resolveIgnition)
-      // 2. realTime !== false — only live packets count; buffered reconnect-burst
-      //                         packets reset the streak to 0
-      // 3. reported speed > 5 — device's GPS speed reading must clear threshold
-      // 4. IMPLIED speed > 5  — displacement / packet-interval must clear 5 km/h.
-      //
-      // Guard #4 is the critical filter for parked vehicles with sparse packet
-      // intervals.  A fixed displacement threshold (e.g. > 50 m) is meaningless
-      // without knowing the time gap: 50 m over 30 s = 6 km/h (real movement),
-      // but 50 m over 5 min = 0.6 km/h (just GPS drift on a stationary vehicle).
-      // Computing implied speed from haversine distance / segment duration normalises
-      // the check across any packet rate.  Packets > 1 hour apart are skipped so a
-      // long offline gap doesn't artificially inflate the implied speed.
+      // NOTE: realTime bit (pkt.realTime) is NOT checked here. Many GT06 firmware
+      // versions never set bit 15 of the course-status word, so pkt.realTime is
+      // always false even for live packets.  Filtering on it blocks all movement
+      // detection for those devices.  The impliedKph guard is sufficient.
       const displacement = (!jumped && prevLat && prevLng && pkt.lat && pkt.lng)
         ? haversine(prevLat, prevLng, pkt.lat, pkt.lng)
         : null;
-      // Use prevGpsPacketTime (captured before state was advanced) so segMs is
-      // the real inter-packet gap.  Using state.lastGpsPacketTime here would give
-      // segMs = 0 because it was already updated to pkt.timestamp above.
+      // prevGpsPacketTime captured before state was advanced — gives the real
+      // inter-packet gap.  state.lastGpsPacketTime is already = pkt.timestamp.
       const segMs = prevGpsPacketTime
         ? (now - new Date(prevGpsPacketTime).getTime())
         : 0;
@@ -767,7 +766,6 @@ async function processPacket(doc, deviceType, _state) {
         : 0;
       const genuinelyMoving = ignitionOn
         && (pkt.speed || 0) > 5
-        && pkt.realTime !== false
         && displacement !== null
         && impliedKph > 5;
 

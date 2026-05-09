@@ -761,9 +761,13 @@ const attachComprehensiveStatus = async (vehicle) => {
     // runningStreak: only meaningful if a recent real packet confirmed it.
     // Use state.lastSeenAt strictly — no updatedAt fallback (reconcile bumps it).
     // If lastSeenAt is null, treat as infinitely stale → streak forced to 0.
-    const streakAge = state.lastSeenAt
-      ? (Date.now() - new Date(state.lastSeenAt).getTime())
-      : Infinity;
+    // Use lastSeenAt (real packet time) for staleness check; fall back to
+    // updatedAt if lastSeenAt is not yet populated (NULL after migration).
+    // If neither is present, trust the DB value.
+    const streakTs = state.lastSeenAt || state.updatedAt;
+    const streakAge = streakTs
+      ? (Date.now() - new Date(streakTs).getTime())
+      : 0;
     deviceStatus.status.runningStreak = streakAge > 90_000 ? 0 : (state.runningStreak ?? 0);
   }
 
@@ -1141,7 +1145,8 @@ const getLivePositions = async (clientId, since) => {
       speedZeroSince:   s.speedZeroSince ?? null,
       engineOffSince:   s.engineOffSince ?? null,
       runningStreak:    (() => {
-        const age = s.lastSeenAt ? (Date.now() - new Date(s.lastSeenAt).getTime()) : Infinity;
+        const ts  = s.lastSeenAt || s.updatedAt;
+        const age = ts ? (Date.now() - new Date(ts).getTime()) : 0;
         return age > 90_000 ? 0 : (s.runningStreak ?? 0);
       })(),
     };

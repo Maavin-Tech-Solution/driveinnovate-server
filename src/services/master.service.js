@@ -33,15 +33,13 @@ const SHARED_DEFAULTS = [
     isDefault: false,
   },
   {
-    // runningStreak counts consecutive LIVE packets where the device confirms
-    // genuine movement: ignition on, speed > 5 km/h, AND > 50 m of actual
-    // spatial displacement between packets.  Requiring 5 in a row means a
-    // vehicle must drive ~250 m of cumulative position change before flipping
-    // to Running — impossible to fake with GPS multipath alone, eliminating
-    // false positives on parked vehicles in noisy reception areas.
+    // runningStreak counts consecutive packets where ignition is on, device
+    // speed > 5 km/h, AND implied speed (haversine / packet interval) > 5 km/h.
+    // Requiring 3 in a row (≈ 90 s at 30-s intervals) debounces GPS startup
+    // jitter while still detecting genuine movement quickly.
     stateName: 'Running',
     stateColor: '#16A34A', stateIcon: '🟢', priority: 30, conditionLogic: 'AND',
-    conditions: [{ field: 'runningStreak', operator: 'gte', value: 5 }],
+    conditions: [{ field: 'runningStreak', operator: 'gte', value: 3 }],
     isDefault: false,
   },
   {

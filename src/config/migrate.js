@@ -127,25 +127,6 @@ async function runMigrations() {
     console.log(`[migrate] Done — added/patched ${added} column(s)`);
   }
 
-  // Reset stale runningStreak counters at startup so any state corrupted by
-  // pre-fix code (e.g. GPS-noise inflated streaks) is cleared.  Only resets
-  // counters where the device hasn't sent a packet in the last 60 s — active
-  // vehicles keep their current streak so genuinely-running vehicles aren't
-  // briefly mis-classified.  Streaks rebuild correctly from the next packet.
-  try {
-    const [resetResult] = await sequelize.query(
-      `UPDATE vehicle_device_states
-         SET running_streak = 0
-       WHERE running_streak > 0
-         AND (last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL 60 SECOND)`
-    );
-    const affected = resetResult?.affectedRows ?? 0;
-    if (affected > 0) {
-      console.log(`[migrate] ✓ Cleared stale runningStreak on ${affected} vehicle state row(s)`);
-    }
-  } catch (err) {
-    console.warn('[migrate] runningStreak reset skipped:', err.message);
-  }
 }
 
 module.exports = { runMigrations };
