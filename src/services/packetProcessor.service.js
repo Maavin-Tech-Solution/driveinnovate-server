@@ -704,10 +704,13 @@ async function processPacket(doc, deviceType, _state) {
     }
     // engineOffSince is managed in the trip logic above — don't overwrite here
 
-    // Capture previous GPS position BEFORE advancing state — needed for the
-    // displacement-based runningStreak check further down.
-    const prevLat = parseFloat(state.lastLat) || null;
-    const prevLng = parseFloat(state.lastLng) || null;
+    // Capture previous GPS position AND packet time BEFORE advancing state.
+    // Both are needed for the displacement + implied-speed runningStreak check.
+    // state.lastGpsPacketTime is overwritten below to the CURRENT packet; if we
+    // read it after that update segMs = 0 → impliedKph = 0 → streak never builds.
+    const prevLat            = parseFloat(state.lastLat) || null;
+    const prevLng            = parseFloat(state.lastLng) || null;
+    const prevGpsPacketTime  = state.lastGpsPacketTime   || null;
 
     // Positional state must only advance forward in time.  An out-of-order packet
     // must not overwrite lastLat/Lng/lastGpsPacketTime — doing so would corrupt
@@ -753,8 +756,11 @@ async function processPacket(doc, deviceType, _state) {
       const displacement = (!jumped && prevLat && prevLng && pkt.lat && pkt.lng)
         ? haversine(prevLat, prevLng, pkt.lat, pkt.lng)
         : null;
-      const segMs = state.lastGpsPacketTime
-        ? (now - new Date(state.lastGpsPacketTime).getTime())
+      // Use prevGpsPacketTime (captured before state was advanced) so segMs is
+      // the real inter-packet gap.  Using state.lastGpsPacketTime here would give
+      // segMs = 0 because it was already updated to pkt.timestamp above.
+      const segMs = prevGpsPacketTime
+        ? (now - new Date(prevGpsPacketTime).getTime())
         : 0;
       const impliedKph = (displacement !== null && segMs > 0 && segMs < 3_600_000)
         ? (displacement * 3_600_000 / segMs)
