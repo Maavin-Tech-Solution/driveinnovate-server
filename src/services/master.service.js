@@ -33,10 +33,11 @@ const SHARED_DEFAULTS = [
     isDefault: false,
   },
   {
-    // runningStreak counts consecutive packets where ignition is on, device
-    // speed > 5 km/h, AND implied speed (haversine / packet interval) > 5 km/h.
-    // Requiring 3 in a row (≈ 90 s at 30-s intervals) debounces GPS startup
-    // jitter while still detecting genuine movement quickly.
+    // runningStreak is GPS-confirmed movement: 3 consecutive packets with
+    // speed > 5 km/h AND implied speed (haversine / interval) > 5 km/h.
+    // Ignition is NOT in the streak condition — AIS140 devices often report
+    // ignition=0 even while driving (unwired ignition line).  The speed+GPS
+    // displacement check alone reliably confirms real movement.
     stateName: 'Running',
     stateColor: '#16A34A', stateIcon: '🟢', priority: 30, conditionLogic: 'AND',
     conditions: [{ field: 'runningStreak', operator: 'gte', value: 3 }],
@@ -159,17 +160,32 @@ const seedBuiltIns = async () => {
       });
     }
 
-    // Seed defaults ONLY if no state definitions exist yet for this device config.
-    // Once present, the user's Master Settings customizations are preserved across
-    // server restarts — they used to be wiped on every boot, which is why state
-    // behaviour appeared inconsistent.  To force a reset, use the explicit
-    // `reseedBuiltInStates(deviceConfigId)` API or delete the rows manually.
-    const existingCount = await StateDefinition.count({ where: { deviceConfigId: config.id } });
-    if (existingCount === 0) {
+    // For each built-in state definition, upsert: create if missing, update
+    // conditions + priority if it exists so code changes (e.g. runningStreak
+    // threshold) are applied on every restart without wiping user customisations
+    // like custom colour or icon.
+    const existing = await StateDefinition.findAll({ where: { deviceConfigId: config.id } });
+    if (existing.length === 0) {
       await StateDefinition.bulkCreate(
         defaults.map(d => ({ ...d, deviceConfigId: config.id }))
       );
       console.log(`[seedBuiltIns] Seeded ${defaults.length} default states for ${spec.type}`);
+    } else {
+      for (const def of defaults) {
+        const row = existing.find(r => r.stateName === def.stateName);
+        if (row) {
+          // Sync conditions and priority; preserve user-set colour/icon
+          await row.update({
+            conditions:     def.conditions,
+            conditionLogic: def.conditionLogic,
+            priority:       def.priority,
+            isDefault:      def.isDefault,
+          });
+        } else {
+          await StateDefinition.create({ ...def, deviceConfigId: config.id });
+          console.log(`[seedBuiltIns] Added missing state "${def.stateName}" for ${spec.type}`);
+        }
+      }
     }
   }
 };

@@ -780,7 +780,7 @@ const attachComprehensiveStatus = async (vehicle) => {
 const getVehicles = async (clientId) => {
   console.log('[GET_VEHICLES] Fetching vehicles for client(s):', Array.isArray(clientId) ? `[${clientId.length} ids]` : clientId);
   const vehicles = await Vehicle.findAll({
-    where: { clientId },
+    where: { clientId, status: { [Op.ne]: 'deleted' } },
     include: [{ model: RtoDetail, as: 'rtoDetail' }]
   });
   
@@ -1097,7 +1097,7 @@ const getLocationPlayerData = async (id, callerClientIds, from, to, limit = 1000
  */
 const getLivePositions = async (clientId, since) => {
   const vehicles = await Vehicle.findAll({
-    where: { clientId },
+    where: { clientId, status: { [Op.ne]: 'deleted' } },
     attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
   });
   const vehicleIds = vehicles.map(v => v.id);

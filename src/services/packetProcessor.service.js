@@ -749,23 +749,29 @@ async function processPacket(doc, deviceType, _state) {
       //    movement.  At 30 km/h with 30-second packets, displacement is ~250 m
       //    → impliedKph = 30. Packets > 1 hour apart are skipped (offline gap).
       //
-      // NOTE: realTime bit (pkt.realTime) is NOT checked here. Many GT06 firmware
-      // versions never set bit 15 of the course-status word, so pkt.realTime is
-      // always false even for live packets.  Filtering on it blocks all movement
-      // detection for those devices.  The impliedKph guard is sufficient.
+      // runningStreak is GPS-only movement confirmation — ignitionOn is NOT
+      // required here.  AIS140 devices frequently have ignition=0 in packets
+      // even when the vehicle is physically driving (unwired ignition line or
+      // AIS140-specific reporting), so gating on ignitionOn causes streak to
+      // permanently stay 0 for those vehicles.  The state DEFINITION already
+      // handles ignition requirements (e.g. Running = ignition=true AND streak>=3).
+      // The streak's job is only to confirm that the GPS is showing real, sustained
+      // movement — the three guards below do that reliably without ignition:
+      //   1. speed > 5      — device GPS speed reading
+      //   2. displacement   — position must actually change between packets
+      //   3. impliedKph > 5 — rate of change normalised by packet interval so
+      //                        parked-vehicle GPS drift (50 m over 5 min = 0.6 km/h)
+      //                        does not count, even when reported speed reads > 5
       const displacement = (!jumped && prevLat && prevLng && pkt.lat && pkt.lng)
         ? haversine(prevLat, prevLng, pkt.lat, pkt.lng)
         : null;
-      // prevGpsPacketTime captured before state was advanced — gives the real
-      // inter-packet gap.  state.lastGpsPacketTime is already = pkt.timestamp.
       const segMs = prevGpsPacketTime
         ? (now - new Date(prevGpsPacketTime).getTime())
         : 0;
       const impliedKph = (displacement !== null && segMs > 0 && segMs < 3_600_000)
         ? (displacement * 3_600_000 / segMs)
         : 0;
-      const genuinelyMoving = ignitionOn
-        && (pkt.speed || 0) > 5
+      const genuinelyMoving = (pkt.speed || 0) > 5
         && displacement !== null
         && impliedKph > 5;
 

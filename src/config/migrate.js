@@ -127,6 +127,65 @@ async function runMigrations() {
     console.log(`[migrate] Done — added/patched ${added} column(s)`);
   }
 
+  // ── Force-sync the Running state condition ──────────────────────────────────
+  // seedBuiltIns only seeds when states are absent, so code changes to the
+  // Running threshold (value in SHARED_DEFAULTS) never propagate to existing
+  // installations.  This migration patches the Running state to the canonical
+  // threshold (runningStreak >= 3) regardless of what is currently in the DB.
+  try {
+    const [syncResult] = await sequelize.query(`
+      UPDATE di_state_definition
+         SET conditions = JSON_SET(
+               conditions,
+               '$[0].value', 3
+             )
+       WHERE state_name = 'Running'
+         AND JSON_UNQUOTE(JSON_EXTRACT(conditions, '$[0].field'))    = 'runningStreak'
+         AND JSON_UNQUOTE(JSON_EXTRACT(conditions, '$[0].operator')) = 'gte'
+         AND JSON_EXTRACT(conditions, '$[0].value') != 3
+    `);
+    const changed = syncResult?.affectedRows ?? 0;
+    if (changed > 0) {
+      console.log(`[migrate] ✓ Updated Running state threshold → runningStreak >= 3 on ${changed} row(s)`);
+    }
+  } catch (err) {
+    console.warn('[migrate] Running state sync skipped:', err.message);
+  }
+
+  // ── Diagnostic: log current runningStreak distribution for analysis ─────────
+  try {
+    const [streakRows] = await sequelize.query(`
+      SELECT
+        v.device_type,
+        COUNT(*)                              AS total,
+        SUM(vds.running_streak >= 3)          AS streak_3_plus,
+        SUM(vds.running_streak >= 1)          AS streak_1_plus,
+        MAX(vds.running_streak)               AS max_streak,
+        SUM(vds.engine_on = 1)                AS engine_on,
+        SUM(vds.last_seen_at IS NOT NULL)     AS has_last_seen_at,
+        SUM(vds.last_speed > 5)               AS speed_above_5
+      FROM vehicle_device_states vds
+      JOIN di_user_vehicle v ON v.id = vds.vehicle_id
+      WHERE vds.last_seen_at IS NOT NULL OR vds.running_streak > 0
+      GROUP BY v.device_type
+      ORDER BY v.device_type
+    `);
+    if (streakRows.length) {
+      console.log('[migrate] ── Running-state diagnostic ──────────────────────');
+      streakRows.forEach(r => {
+        console.log(
+          `[migrate]  ${r.device_type || 'unknown'}: total=${r.total}` +
+          ` | engineOn=${r.engine_on} | speed>5=${r.speed_above_5}` +
+          ` | streak>=1=${r.streak_1_plus} | streak>=3=${r.streak_3_plus}` +
+          ` | maxStreak=${r.max_streak} | hasLastSeenAt=${r.has_last_seen_at}`
+        );
+      });
+      console.log('[migrate] ─────────────────────────────────────────────────');
+    }
+  } catch (err) {
+    console.warn('[migrate] Diagnostic query skipped:', err.message);
+  }
+
 }
 
 module.exports = { runMigrations };
