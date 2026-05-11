@@ -2,22 +2,31 @@ const { DeviceConfig, StateDefinition } = require('../models');
 const { getCapabilities }               = require('../config/deviceCapabilities');
 
 // ─── Default state definitions ────────────────────────────────────────────────
-// Industry-standard six-state spec.  Conditions use ONLY fields that are
-// available from the 5-second live-position poll — no server-side streak
-// counters that go stale between full reloads.
+// Industry-standard six-state spec.  Works across GT06, AIS140, FMB125/920.
 //
 // Priority (lower = evaluated first, first match wins):
-//   10  Offline    no packet received in last 10 min  → lastSeenSeconds > 600
+//   10  Offline    no packet processed in last 10 min → lastSeenSeconds > 600
 //   20  Overspeed  speed at/above threshold            → speed >= 80
-//   30  Running    engine ON and moving                → ignition=true AND speed > 5
-//   40  Idle       engine ON but stationary 3+ min     → ignition=true AND speedZeroSeconds >= 180
-//   50  Stopped    engine OFF                          → ignition=false
+//   30  Running    GPS confirms sustained movement     → runningStreak >= 3
+//                  (3 consecutive packets: speed>5 AND implied-speed>5 km/h)
+//                  ignition is NOT required — AIS140 devices may not wire it
+//   40  Idle       engine on, speed zero 3+ min        → ignition=true AND speedZeroSeconds >= 180
+//   50  Stopped    engine off                          → ignition=false
 //   99  Online     fallback (device seen, no rule hit) (isDefault)
+//
+// AIS140 notes:
+//   - ignitionSource='ignition-io' → ignition is the dedicated VLTD field (0/1)
+//   - runningStreak builds from GPS movement, not ignition → Running works even
+//     if ignition is unwired
+//   - speedZeroSince is set by the packet processor when speed=0, populating
+//     speedZeroSeconds dynamically on each 30-s stateTick → Idle works
+//   - Stopped (ignition=false) and Idle (ignition=true+speedZeroSeconds>=180)
+//     both depend on the ignition signal being wired
 
 const OFFLINE_SECONDS  = 600;    // 10 min
 const OVERSPEED_KMPH   = 80;
-const RUNNING_STREAK   = 3;      // consecutive GPS packets with speed > 5 km/h
-const IDLE_ZERO_SECS   = 180;    // 3 min stationary before "Idle"
+const RUNNING_STREAK   = 3;      // consecutive GPS-confirmed movement packets
+const IDLE_ZERO_SECS   = 180;    // 3 min stationary with engine on → Idle
 
 const SHARED_DEFAULTS = [
   {

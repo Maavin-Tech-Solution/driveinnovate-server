@@ -127,33 +127,87 @@ async function runMigrations() {
     console.log(`[migrate] Done — added/patched ${added} column(s)`);
   }
 
-  // ── Force-sync the Running state condition ──────────────────────────────────
-  // seedBuiltIns only seeds when states are absent, so code changes to the
-  // Running threshold (value in SHARED_DEFAULTS) never propagate to existing
-  // installations.  This migration patches the Running state to the canonical
-  // threshold (runningStreak >= 3) regardless of what is currently in the DB.
-  try {
-    const [syncResult] = await sequelize.query(`
-      UPDATE di_state_definition
-         SET conditions = JSON_SET(
-               conditions,
-               '$[0].value', 3
-             )
-       WHERE state_name = 'Running'
-         AND JSON_UNQUOTE(JSON_EXTRACT(conditions, '$[0].field'))    = 'runningStreak'
-         AND JSON_UNQUOTE(JSON_EXTRACT(conditions, '$[0].operator')) = 'gte'
-         AND JSON_EXTRACT(conditions, '$[0].value') != 3
-    `);
-    const changed = syncResult?.affectedRows ?? 0;
-    if (changed > 0) {
-      console.log(`[migrate] ✓ Updated Running state threshold → runningStreak >= 3 on ${changed} row(s)`);
+  // ── Force-sync all built-in state conditions to canonical spec ───────────────
+  // The seedBuiltIns upsert runs on server start and should handle this, but
+  // SQL patches here guarantee correctness even if seedBuiltIns hasn't propagated
+  // (e.g. server restarted before seedBuiltIns ran, or partial migration).
+  const statePatches = [
+    // Running: GPS-only, runningStreak >= 3 (no ignition dependency)
+    {
+      name: 'Running (runningStreak>=3)',
+      sql: `UPDATE di_state_definition
+               SET conditions = '[{"field":"runningStreak","operator":"gte","value":3}]',
+                   condition_logic = 'AND', priority = 30, is_default = 0
+             WHERE state_name = 'Running'
+               AND (JSON_EXTRACT(conditions,'$[0].field') != 'runningStreak'
+                 OR JSON_EXTRACT(conditions,'$[0].value') != 3)`,
+    },
+    // Idle: ignition=true AND speedZeroSeconds>=180
+    {
+      name: 'Idle (speedZeroSeconds>=180)',
+      sql: `UPDATE di_state_definition
+               SET conditions = '[{"field":"ignition","operator":"eq","value":true},{"field":"speedZeroSeconds","operator":"gte","value":180}]',
+                   condition_logic = 'AND', priority = 40, is_default = 0
+             WHERE state_name = 'Idle'
+               AND (JSON_LENGTH(conditions) != 2
+                 OR JSON_EXTRACT(conditions,'$[1].value') != 180)`,
+    },
+    // Stopped: ignition=false only
+    {
+      name: 'Stopped (ignition=false)',
+      sql: `UPDATE di_state_definition
+               SET conditions = '[{"field":"ignition","operator":"eq","value":false}]',
+                   condition_logic = 'AND', priority = 50, is_default = 0
+             WHERE state_name = 'Stopped'
+               AND JSON_LENGTH(conditions) != 1`,
+    },
+    // Offline: lastSeenSeconds > 600
+    {
+      name: 'Offline (lastSeenSeconds>600)',
+      sql: `UPDATE di_state_definition
+               SET conditions = '[{"field":"lastSeenSeconds","operator":"gt","value":600}]',
+                   condition_logic = 'AND', priority = 10, is_default = 0
+             WHERE state_name = 'Offline'
+               AND JSON_EXTRACT(conditions,'$[0].value') != 600`,
+    },
+  ];
+  for (const patch of statePatches) {
+    try {
+      const [r] = await sequelize.query(patch.sql);
+      if ((r?.affectedRows ?? 0) > 0) {
+        console.log(`[migrate] ✓ Patched state "${patch.name}" on ${r.affectedRows} row(s)`);
+      }
+    } catch (err) {
+      console.warn(`[migrate] State patch "${patch.name}" skipped:`, err.message);
     }
-  } catch (err) {
-    console.warn('[migrate] Running state sync skipped:', err.message);
   }
 
-  // ── Diagnostic: log current runningStreak distribution for analysis ─────────
+  // ── Diagnostic: log current state definitions AND vehicle state data ─────────
   try {
+    // 1. What conditions are stored in DB for each state
+    const [stateRows] = await sequelize.query(`
+      SELECT dc.type AS device_type, sd.state_name, sd.priority,
+             sd.conditions, sd.is_default
+        FROM di_state_definition sd
+        JOIN di_device_config dc ON dc.id = sd.device_config_id
+       WHERE dc.type IN ('GT06','GT06N','FMB125','FMB920','AIS140')
+       ORDER BY dc.type, sd.priority
+    `);
+    if (stateRows.length) {
+      // Print one device type as representative (all should be identical)
+      const byType = {};
+      stateRows.forEach(r => { (byType[r.device_type] = byType[r.device_type] || []).push(r); });
+      const sample = byType['AIS140'] || byType['GT06'] || Object.values(byType)[0] || [];
+      console.log('[migrate] ── State definitions in DB (sample device) ────────');
+      sample.forEach(r => {
+        const conds = (typeof r.conditions === 'string' ? JSON.parse(r.conditions) : r.conditions) || [];
+        const condStr = conds.map(c => `${c.field} ${c.operator} ${c.value}`).join(' AND ') || '(default)';
+        console.log(`[migrate]  P${r.priority} ${r.state_name}: ${condStr}${r.is_default ? ' [DEFAULT]' : ''}`);
+      });
+      console.log('[migrate] ────────────────────────────────────────────────────');
+    }
+
+    // 2. Vehicle state health per device type
     const [streakRows] = await sequelize.query(`
       SELECT
         v.device_type,
@@ -166,21 +220,21 @@ async function runMigrations() {
         SUM(vds.last_speed > 5)               AS speed_above_5
       FROM vehicle_device_states vds
       JOIN di_user_vehicle v ON v.id = vds.vehicle_id
-      WHERE vds.last_seen_at IS NOT NULL OR vds.running_streak > 0
+      WHERE v.status != 'deleted'
       GROUP BY v.device_type
       ORDER BY v.device_type
     `);
     if (streakRows.length) {
-      console.log('[migrate] ── Running-state diagnostic ──────────────────────');
+      console.log('[migrate] ── Vehicle state health by device type ─────────────');
       streakRows.forEach(r => {
         console.log(
-          `[migrate]  ${r.device_type || 'unknown'}: total=${r.total}` +
+          `[migrate]  ${(r.device_type || 'unknown').padEnd(8)}: total=${r.total}` +
           ` | engineOn=${r.engine_on} | speed>5=${r.speed_above_5}` +
-          ` | streak>=1=${r.streak_1_plus} | streak>=3=${r.streak_3_plus}` +
-          ` | maxStreak=${r.max_streak} | hasLastSeenAt=${r.has_last_seen_at}`
+          ` | streak>=3=${r.streak_3_plus} | maxStreak=${r.max_streak}` +
+          ` | hasLastSeenAt=${r.has_last_seen_at}`
         );
       });
-      console.log('[migrate] ─────────────────────────────────────────────────');
+      console.log('[migrate] ────────────────────────────────────────────────────');
     }
   } catch (err) {
     console.warn('[migrate] Diagnostic query skipped:', err.message);

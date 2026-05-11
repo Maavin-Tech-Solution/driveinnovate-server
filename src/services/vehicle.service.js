@@ -764,10 +764,13 @@ const attachComprehensiveStatus = async (vehicle) => {
     // Use lastSeenAt (real packet time) for staleness check; fall back to
     // updatedAt if lastSeenAt is not yet populated (NULL after migration).
     // If neither is present, trust the DB value.
+    // Conservative: no reliable timestamp → streak is stale → return 0.
+    // Prevents a vehicle silent for hours from staying in Running because
+    // lastSeenAt was never populated (NULL after the column was added).
     const streakTs = state.lastSeenAt || state.updatedAt;
     const streakAge = streakTs
       ? (Date.now() - new Date(streakTs).getTime())
-      : 0;
+      : Infinity;                    // no anchor → treat as infinitely old
     deviceStatus.status.runningStreak = streakAge > 90_000 ? 0 : (state.runningStreak ?? 0);
   }
 
@@ -1146,7 +1149,7 @@ const getLivePositions = async (clientId, since) => {
       engineOffSince:   s.engineOffSince ?? null,
       runningStreak:    (() => {
         const ts  = s.lastSeenAt || s.updatedAt;
-        const age = ts ? (Date.now() - new Date(ts).getTime()) : 0;
+        const age = ts ? (Date.now() - new Date(ts).getTime()) : Infinity;
         return age > 90_000 ? 0 : (s.runningStreak ?? 0);
       })(),
     };
