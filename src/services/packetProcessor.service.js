@@ -393,6 +393,7 @@ async function processPacket(doc, deviceType, _state) {
       if (pkt.battery    != null) state.lastBattery          = pkt.battery;
       if (pkt.gsmSignal  != null) state.lastGsmSignal        = pkt.gsmSignal;
       if (pkt.externalVoltage != null) state.lastExternalVoltage = pkt.externalVoltage;
+      if (pkt.movement   != null) state.lastMovement         = pkt.movement;
       await state.save();
       return _state ? state : undefined;
     }
@@ -787,6 +788,12 @@ async function processPacket(doc, deviceType, _state) {
     state.lastExternalVoltage = pkt.externalVoltage != null ? pkt.externalVoltage : state.lastExternalVoltage;
     state.lastGsmSignal     = pkt.gsmSignal     != null ? pkt.gsmSignal     : state.lastGsmSignal;
     state.lastPacketTime    = pkt.timestamp;
+    // Track AIS140 movement sensor value so the state evaluator can use it
+    // even when GPS has no fix (isStatusOnly packets skip this path, so
+    // lastMovement is only updated from GPS-bearing packets).
+    if (pkt.movement !== null && pkt.movement !== undefined) {
+      state.lastMovement = pkt.movement;
+    }
     // lastSeenAt = real server wall-clock at packet-processing time.
     // This is the authoritative field for "when did we last hear from this
     // device".  Unlike updatedAt it is NOT bumped by reconcileStaleTrips.

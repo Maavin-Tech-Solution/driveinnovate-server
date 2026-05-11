@@ -103,6 +103,12 @@ const VehicleDeviceState = sequelize.define('VehicleDeviceState', {
     comment: 'GSM signal strength (0–5 or raw RSSI depending on device)',
   },
 
+  // ── Movement sensor ──────────────────────────────────────────────────────
+  lastMovement: {
+    type: DataTypes.BOOLEAN, allowNull: true, field: 'last_movement',
+    comment: 'AIS140 vehicle movement sensor (true=moving, false=stationary, null=no data)',
+  },
+
   // ── Packet timing ────────────────────────────────────────────────────────
   lastPacketTime: {
     type: DataTypes.DATE, allowNull: true, field: 'last_packet_time',

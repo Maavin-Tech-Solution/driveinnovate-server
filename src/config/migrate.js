@@ -29,6 +29,7 @@ const MIGRATIONS = [
   { table: 'vehicle_device_states', column: 'speed_zero_since',      ddl: 'DATETIME(6) NULL COMMENT "When speed last became 0; cleared on speed>0. Drives Idle 4-min rule"' },
   { table: 'vehicle_device_states', column: 'running_streak',        ddl: 'TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT "Consecutive packets with speed>5. Drives Running 3-packets rule"' },
   { table: 'vehicle_device_states', column: 'last_seen_at',          ddl: 'DATETIME(6) NULL COMMENT "Real server UTC at last packet processing — never bumped by reconcile/migrations"' },
+  { table: 'vehicle_device_states', column: 'last_movement',         ddl: 'TINYINT(1) NULL COMMENT "AIS140 movement sensor: 1=moving, 0=stationary, NULL=device has no movement sensor"' },
 
   // ── trips ──────────────────────────────────────────────────────────────────
   { table: 'trips', column: 'status', ddl: "ENUM('in_progress','completed') NOT NULL DEFAULT 'completed' COMMENT \"Trip lifecycle state\"" },
@@ -132,14 +133,15 @@ async function runMigrations() {
   // SQL patches here guarantee correctness even if seedBuiltIns hasn't propagated
   // (e.g. server restarted before seedBuiltIns ran, or partial migration).
   const statePatches = [
-    // Running: GPS-only, runningStreak >= 3 (no ignition dependency)
+    // Running: OR — GPS streak (>=3) OR AIS140 movement sensor
     {
-      name: 'Running (runningStreak>=3)',
+      name: 'Running (runningStreak>=3 OR movement=true)',
       sql: `UPDATE di_state_definition
-               SET conditions = '[{"field":"runningStreak","operator":"gte","value":3}]',
-                   condition_logic = 'AND', priority = 30, is_default = 0
+               SET conditions = '[{"field":"runningStreak","operator":"gte","value":3},{"field":"movement","operator":"eq","value":true}]',
+                   condition_logic = 'OR', priority = 30, is_default = 0
              WHERE state_name = 'Running'
-               AND (JSON_EXTRACT(conditions,'$[0].field') != 'runningStreak'
+               AND (condition_logic != 'OR'
+                 OR JSON_LENGTH(conditions) < 2
                  OR JSON_EXTRACT(conditions,'$[0].value') != 3)`,
     },
     // Idle: ignition=true AND speedZeroSeconds>=180

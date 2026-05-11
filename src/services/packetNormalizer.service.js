@@ -223,7 +223,10 @@ function normalizeAIS140(doc) {
     externalVoltage: doc.mainPowerVoltage != null ? parseFloat(doc.mainPowerVoltage) : null,
     gsmSignal:       doc.gsmSignal != null ? parseInt(doc.gsmSignal, 10) : null,
 
-    // AIS-140 specific — carried through for the Emergency state check
+    // AIS-140 specific
+    // movement: vehicle's own physical movement sensor (accelerometer/speed signal).
+    // More reliable than GPS speed — set to true even when GPS has no fix.
+    movement:    doc.movement != null ? Boolean(doc.movement) : null,
     emergency:   doc.emergencyStatus ? true : false,
     tamper:      doc.tamperAlert     ? true : false,
 

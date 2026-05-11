@@ -772,6 +772,10 @@ const attachComprehensiveStatus = async (vehicle) => {
       ? (Date.now() - new Date(streakTs).getTime())
       : Infinity;                    // no anchor → treat as infinitely old
     deviceStatus.status.runningStreak = streakAge > 90_000 ? 0 : (state.runningStreak ?? 0);
+    // AIS140 physical movement sensor — surfaces to state evaluator
+    if (state.lastMovement != null) {
+      deviceStatus.status.movement = state.lastMovement;
+    }
   }
 
   return { ...vehicleJson, deviceStatus };
@@ -1121,7 +1125,7 @@ const getLivePositions = async (clientId, since) => {
     attributes: [
       'vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn',
       'lastPacketTime', 'updatedAt', 'lastSeenAt',
-      'speedZeroSince', 'engineOffSince', 'runningStreak',
+      'speedZeroSince', 'engineOffSince', 'runningStreak', 'lastMovement',
     ],
   });
 
@@ -1152,6 +1156,7 @@ const getLivePositions = async (clientId, since) => {
         const age = ts ? (Date.now() - new Date(ts).getTime()) : Infinity;
         return age > 90_000 ? 0 : (s.runningStreak ?? 0);
       })(),
+      movement:         s.lastMovement ?? null,
     };
   }).filter(Boolean);
 };

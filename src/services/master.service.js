@@ -47,9 +47,13 @@ const SHARED_DEFAULTS = [
     // Ignition is NOT in the streak condition — AIS140 devices often report
     // ignition=0 even while driving (unwired ignition line).  The speed+GPS
     // displacement check alone reliably confirms real movement.
+    // Running fires on EITHER GPS streak OR AIS140 movement sensor (OR logic).
     stateName: 'Running',
-    stateColor: '#16A34A', stateIcon: '🟢', priority: 30, conditionLogic: 'AND',
-    conditions: [{ field: 'runningStreak', operator: 'gte', value: 3 }],
+    stateColor: '#16A34A', stateIcon: '🟢', priority: 30, conditionLogic: 'OR',
+    conditions: [
+      { field: 'runningStreak', operator: 'gte', value: 3    },
+      { field: 'movement',      operator: 'eq',  value: true },
+    ],
     isDefault: false,
   },
   {
