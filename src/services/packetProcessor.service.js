@@ -699,12 +699,11 @@ async function processPacket(doc, deviceType, _state) {
     }
 
     // ── Persist live device state ──────────────────────────────────────────────
-    // Only update engineOn from live packets — buffered/historical GT06 packets
-    // (realTime=false) must not overwrite the current ignition state, since they
-    // replay old engine-on readings onto a vehicle that may now be parked.
-    if (pkt.realTime !== false) {
-      state.engineOn = ignitionOn;
-    }
+    // Always update engineOn — the realTime guard was removed because many GT06
+    // firmware versions permanently send realTime=false even for live packets,
+    // freezing engineOn at its initial value forever.  resolveIgnition() already
+    // correctly handles the acc=true/false signal, so no guard is needed here.
+    state.engineOn = ignitionOn;
     // engineOffSince is managed in the trip logic above — don't overwrite here
 
     // Capture previous GPS position AND packet time BEFORE advancing state.
