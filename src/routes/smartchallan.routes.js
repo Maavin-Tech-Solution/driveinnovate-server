@@ -3,6 +3,9 @@ const router  = express.Router();
 const validateConsumer = require('../middleware/validateConsumer');
 const ctrl = require('../controllers/smartchallan.controller');
 
+// Connectivity ping (no auth needed — just checks if SC server is reachable)
+router.get('/ping', ctrl.ping);
+
 // Settings
 router.get ('/settings',      validateConsumer, ctrl.getSettings);
 router.put ('/settings',      validateConsumer, ctrl.saveSettings);

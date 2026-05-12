@@ -25,7 +25,7 @@ console.log(`[SmartChallan] API base: ${SC_PROTOCOL}://${SC_BASE_HOST}:${SC_BASE
 
 const _tokenCache = new Map();
 
-function _request(method, path, body, headers = {}, timeoutMs = 15_000) {
+function _request(method, path, body, headers = {}, timeoutMs = 8_000) {
   return new Promise((resolve, reject) => {
     const bodyStr = body ? JSON.stringify(body) : null;
     const opts = {
@@ -39,25 +39,33 @@ function _request(method, path, body, headers = {}, timeoutMs = 15_000) {
         ...headers,
       },
     };
+    console.log(`[SC] → ${method} ${SC_PROTOCOL}://${SC_BASE_HOST}:${SC_BASE_PORT}${path}`);
     const transport = SC_PROTOCOL === 'https' ? https : http;
     const req = transport.request(opts, (res) => {
       let raw = '';
       res.on('data', c => { raw += c; });
       res.on('end', () => {
+        console.log(`[SC] ← ${res.statusCode} ${path} (${raw.length} bytes)`);
         try {
           const data = JSON.parse(raw);
           if (res.statusCode >= 400) {
             const err = new Error(data?.message || `HTTP ${res.statusCode}`);
-            err.status = res.statusCode;
-            err.response = { data };
+            err.status = res.statusCode; err.response = { data };
             return reject(err);
           }
           resolve(data);
-        } catch (e) { reject(new Error('Invalid JSON from SmartChallan API')); }
+        } catch (e) { reject(new Error(`Invalid JSON from SC API: ${raw.slice(0, 100)}`)); }
       });
     });
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('SmartChallan request timed out')); });
-    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy();
+      console.error(`[SC] TIMEOUT after ${timeoutMs}ms — ${SC_BASE_HOST}:${SC_BASE_PORT} unreachable`);
+      reject(new Error(`SmartChallan API unreachable (${SC_BASE_HOST}:${SC_BASE_PORT}) — check network/firewall`));
+    });
+    req.on('error', (e) => {
+      console.error(`[SC] ERROR ${path}:`, e.message);
+      reject(e);
+    });
     if (bodyStr) req.write(bodyStr);
     req.end();
   });
