@@ -8,11 +8,20 @@
  * 5 minutes before expiry so callers never get a stale token.
  */
 
+const http  = require('http');
 const https = require('https');
+const url   = require('url');
 
-const SC_BASE_HOST = 'api.smartchallan.com';
+// SC_API_URL can be set in server .env — defaults to http://api.technoton.co.in:4001
+const SC_API_URL  = process.env.SC_API_URL || 'http://api.technoton.co.in:4001';
+const _parsed     = url.parse(SC_API_URL);
+const SC_PROTOCOL = _parsed.protocol === 'https:' ? 'https' : 'http';
+const SC_BASE_HOST = _parsed.hostname;
+const SC_BASE_PORT = parseInt(_parsed.port || (SC_PROTOCOL === 'https' ? '443' : '80'), 10);
 const TOKEN_TTL_MS    = 12 * 60 * 60 * 1000;
 const REFRESH_BEFORE_MS = 5 * 60 * 1000;
+
+console.log(`[SmartChallan] API base: ${SC_PROTOCOL}://${SC_BASE_HOST}:${SC_BASE_PORT}`);
 
 const _tokenCache = new Map();
 
@@ -21,7 +30,7 @@ function _request(method, path, body, headers = {}, timeoutMs = 15_000) {
     const bodyStr = body ? JSON.stringify(body) : null;
     const opts = {
       hostname: SC_BASE_HOST,
-      port: 443,
+      port: SC_BASE_PORT,
       path,
       method,
       headers: {
@@ -30,7 +39,8 @@ function _request(method, path, body, headers = {}, timeoutMs = 15_000) {
         ...headers,
       },
     };
-    const req = https.request(opts, (res) => {
+    const transport = SC_PROTOCOL === 'https' ? https : http;
+    const req = transport.request(opts, (res) => {
       let raw = '';
       res.on('data', c => { raw += c; });
       res.on('end', () => {
