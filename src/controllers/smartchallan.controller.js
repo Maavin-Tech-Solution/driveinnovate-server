@@ -51,26 +51,37 @@ exports.testCredentials = async (req, res) => {
 };
 
 exports.getRtoData = async (req, res) => {
+  // Respond within 20 s so the client never hangs indefinitely
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) res.json({ success: true, data: [], disabled: false, timeout: true });
+  }, 20_000);
   try {
     const user = await User.findByPk(req.user.id, { attributes: SC_FIELDS });
-    console.log('[SC:RTO] user settings:', user?.toJSON?.());
+    console.log('[SC:RTO] user sc_enabled=%s sc_rto_enabled=%s', user?.scEnabled, user?.scRtoEnabled);
+    clearTimeout(timeout);
     if (!user?.scEnabled || !user?.scRtoEnabled) return res.json({ success: true, data: [], disabled: true });
     if (!user.scUsername || !user.scPassword) return res.status(400).json({ success: false, message: 'SmartChallan credentials not configured' });
     const data = await sc.getRtoData(req.user.id, user.scUsername, user.scPassword);
     res.json({ success: true, data });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.response?.data?.message || err.message });
+    clearTimeout(timeout);
+    if (!res.headersSent) res.status(500).json({ success: false, message: err.message });
   }
 };
 
 exports.getChallanData = async (req, res) => {
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) res.json({ success: true, data: [], disabled: false, timeout: true });
+  }, 20_000);
   try {
     const user = await User.findByPk(req.user.id, { attributes: SC_FIELDS });
+    clearTimeout(timeout);
     if (!user?.scEnabled || !user?.scChallanEnabled) return res.json({ success: true, data: [], disabled: true });
     if (!user.scUsername || !user.scPassword) return res.status(400).json({ success: false, message: 'SmartChallan credentials not configured' });
     const data = await sc.getChallanData(req.user.id, user.scUsername, user.scPassword);
     res.json({ success: true, data });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.response?.data?.message || err.message });
+    clearTimeout(timeout);
+    if (!res.headersSent) res.status(500).json({ success: false, message: err.message });
   }
 };
