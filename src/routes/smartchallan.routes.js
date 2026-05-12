@@ -1,6 +1,6 @@
 const express = require('express');
 const router  = express.Router();
-const { validateConsumer } = require('../middleware/validateConsumer');
+const validateConsumer = require('../middleware/validateConsumer');
 const ctrl = require('../controllers/smartchallan.controller');
 
 // Settings
