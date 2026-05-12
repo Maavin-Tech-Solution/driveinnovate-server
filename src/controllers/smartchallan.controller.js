@@ -53,6 +53,7 @@ exports.testCredentials = async (req, res) => {
 exports.getRtoData = async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, { attributes: SC_FIELDS });
+    console.log('[SC:RTO] user settings:', user?.toJSON?.());
     if (!user?.scEnabled || !user?.scRtoEnabled) return res.json({ success: true, data: [], disabled: true });
     if (!user.scUsername || !user.scPassword) return res.status(400).json({ success: false, message: 'SmartChallan credentials not configured' });
     const data = await sc.getRtoData(req.user.id, user.scUsername, user.scPassword);
