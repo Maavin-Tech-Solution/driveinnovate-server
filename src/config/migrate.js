@@ -50,6 +50,14 @@ const MIGRATIONS = [
   { table: 'di_user', column: 'account_type',    ddl: "ENUM('trial','billable','demo','master') NOT NULL DEFAULT 'trial' COMMENT \"Account subscription type\"" },
   { table: 'di_user', column: 'trial_expires_at', ddl: 'DATETIME NULL COMMENT "Trial expiry timestamp; NULL = no expiry enforced"' },
 
+  // ── SmartChallan integration settings ────────────────────────────────────
+  { table: 'di_user', column: 'sc_enabled',          ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Master toggle for SmartChallan integration\"" },
+  { table: 'di_user', column: 'sc_username',          ddl: "VARCHAR(255) NULL COMMENT \"SmartChallan login email\"" },
+  { table: 'di_user', column: 'sc_password',          ddl: "VARCHAR(255) NULL COMMENT \"SmartChallan password (stored as-is; rotate regularly)\"" },
+  { table: 'di_user', column: 'sc_rto_enabled',       ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Enable RTO data from SmartChallan\"" },
+  { table: 'di_user', column: 'sc_challan_enabled',   ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Enable Challan data from SmartChallan\"" },
+  { table: 'di_user', column: 'sc_dl_enabled',        ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Enable DL verification from SmartChallan\"" },
+
   // ── di_user_vehicle (per-vehicle subscription expiry + optional SIMs) ────
   { table: 'di_user_vehicle', column: 'subscription_expires_at', ddl: 'DATETIME NULL COMMENT "Billable subscription expiry per vehicle"' },
   { table: 'di_user_vehicle', column: 'sim1', ddl: 'VARCHAR(30) NULL COMMENT "Primary SIM number in the GPS device (optional)"' },

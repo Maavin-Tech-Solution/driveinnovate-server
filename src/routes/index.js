@@ -19,7 +19,8 @@ const supportRoutes = require('./support.routes');
 const geofenceRoutes = require('./geofence.routes');
 const permissionRoutes = require('./permission.routes');
 const masterRoutes = require('./master.routes');
-const contactRoutes = require('./contact.routes');
+const contactRoutes      = require('./contact.routes');
+const smartchallanRoutes = require('./smartchallan.routes');
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -40,5 +41,6 @@ router.use('/geofences', geofenceRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/master', masterRoutes);
 router.use('/contact', contactRoutes);
+router.use('/smartchallan', smartchallanRoutes);
 
 module.exports = router;

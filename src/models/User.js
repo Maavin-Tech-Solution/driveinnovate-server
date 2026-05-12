@@ -45,6 +45,13 @@ const User = sequelize.define(
       allowNull: true,
       comment: 'When null on a trial account, no expiry is enforced',
     },
+    // SmartChallan integration
+    scEnabled:        { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_enabled' },
+    scUsername:       { type: DataTypes.STRING(255), allowNull: true, field: 'sc_username' },
+    scPassword:       { type: DataTypes.STRING(255), allowNull: true, field: 'sc_password' },
+    scRtoEnabled:     { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_rto_enabled' },
+    scChallanEnabled: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_challan_enabled' },
+    scDlEnabled:      { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_dl_enabled' },
   },
   {
     tableName: 'di_user',
