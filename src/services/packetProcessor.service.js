@@ -863,12 +863,22 @@ async function processPacketInner(doc, deviceType, _state) {
 const STALE_THRESHOLD_MS = 15 * 60 * 1000;
 
 async function reconcileStaleTrips() {
+  const { sequelize: db } = require('../models');
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
   try {
-    // Read-only scan — no locks held during the loop itself
+    // Set a short session-level lock wait timeout so reconcile fails fast on
+    // locked rows instead of hanging for MySQL's default 50 s.  processPacket
+    // holds trip row locks for only a few ms; 3 s is more than enough to
+    // distinguish "genuinely locked" from "processPacket is mid-update".
+    try {
+      await db.query('SET SESSION innodb_lock_wait_timeout = 3');
+    } catch (_) { /* ignore — not all MySQL setups allow session variable changes */ }
+
     const staleTrips = await Trip.findAll({
       where: { status: 'in_progress' },
       attributes: ['id', 'vehicleId', 'startTime', 'endTime'],
-      lock: false,          // advisory read — avoids lock contention with processPacket
+      lock: false,
     });
 
     if (!staleTrips.length) {
@@ -878,63 +888,84 @@ async function reconcileStaleTrips() {
 
     console.log(`[Reconcile] Found ${staleTrips.length} in_progress trip(s) — checking states…`);
     let closed = 0;
+    let skipped = 0;
 
     for (const trip of staleTrips) {
-      try {
-        const state = await VehicleDeviceState.findOne({
-          where: { vehicleId: trip.vehicleId },
-          lock: false,
-        });
+      // Small inter-trip pause so processPacket can finish any in-flight update
+      // on the previous vehicle before we attempt the next one.
+      await sleep(50);
 
-        const endTimeMs    = trip.endTime ? new Date(trip.endTime).getTime() : null;
-        const staleSinceMs = endTimeMs ? Date.now() - endTimeMs : null;
-        const isStale      = staleSinceMs !== null && staleSinceMs > STALE_THRESHOLD_MS;
+      let lastErr;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (attempt > 0) await sleep(attempt * 500); // 500 ms, 1000 ms back-off
 
-        const shouldClose =
-          !state ||
-          state.currentTripId !== trip.id ||
-          (state.currentTripId === trip.id && !state.engineOn) ||
-          isStale;
+          const state = await VehicleDeviceState.findOne({
+            where: { vehicleId: trip.vehicleId },
+            lock: false,
+          });
 
-        if (!shouldClose) continue;
+          const endTimeMs    = trip.endTime ? new Date(trip.endTime).getTime() : null;
+          const staleSinceMs = endTimeMs ? Date.now() - endTimeMs : null;
+          const isStale      = staleSinceMs !== null && staleSinceMs > STALE_THRESHOLD_MS;
 
-        const endTime = trip.endTime || state?.lastPacketTime || new Date();
-        const durationSec = Math.max(
-          0,
-          Math.floor((new Date(endTime).getTime() - new Date(trip.startTime).getTime()) / 1000)
-        );
+          const shouldClose =
+            !state ||
+            state.currentTripId !== trip.id ||
+            (state.currentTripId === trip.id && !state.engineOn) ||
+            isStale;
 
-        // Use WHERE-clause UPDATE — atomic single statement, holds lock for
-        // microseconds instead of across a read-modify-write cycle.
-        // Only updates if the row is still in_progress (guards against a race
-        // where processPacket already closed it between our read and this write).
-        const [affected] = await Trip.update(
-          { status: 'completed', endTime, duration: durationSec },
-          { where: { id: trip.id, status: 'in_progress' } }
-        );
+          if (!shouldClose) { lastErr = null; break; }
 
-        if (affected) {
-          // Clear state pointer — best-effort, packet processor fixes it on next packet
-          if (state?.currentTripId === trip.id) {
-            try {
-              await VehicleDeviceState.update(
-                { currentTripId: null },
-                { where: { vehicleId: trip.vehicleId, currentTripId: trip.id } }
-              );
-            } catch (_) { /* non-fatal — processor will correct on next packet */ }
+          const endTime = trip.endTime || state?.lastPacketTime || new Date();
+          const durationSec = Math.max(
+            0,
+            Math.floor((new Date(endTime).getTime() - new Date(trip.startTime).getTime()) / 1000)
+          );
+
+          const [affected] = await Trip.update(
+            { status: 'completed', endTime, duration: durationSec },
+            { where: { id: trip.id, status: 'in_progress' } }
+          );
+
+          if (affected) {
+            if (state?.currentTripId === trip.id) {
+              try {
+                await VehicleDeviceState.update(
+                  { currentTripId: null },
+                  { where: { vehicleId: trip.vehicleId, currentTripId: trip.id } }
+                );
+              } catch (_) { /* non-fatal */ }
+            }
+            console.log(`[Reconcile] Closed stale trip #${trip.id} (vehicle ${trip.vehicleId}, ${durationSec}s)`);
+            closed++;
           }
-          console.log(`[Reconcile] Closed stale trip #${trip.id} (vehicle ${trip.vehicleId}, ${durationSec}s)`);
-          closed++;
+          lastErr = null;
+          break; // success
+        } catch (err) {
+          lastErr = err;
+          const msg = (err.message || '').toLowerCase();
+          if (!msg.includes('lock') && !msg.includes('timeout') && !msg.includes('deadlock')) break;
         }
-      } catch (tripErr) {
-        // Per-trip error: log and continue — don't abort the whole reconcile run
-        console.warn(`[Reconcile] Skipped trip #${trip.id}: ${tripErr.message}`);
+      }
+
+      if (lastErr) {
+        skipped++;
+        // Only log first occurrence at WARN level; subsequent ones are DEBUG noise
+        if (skipped === 1) console.warn(`[Reconcile] Skipped trip #${trip.id} after retries: ${lastErr.message}`);
       }
     }
 
-    console.log(`[Reconcile] Done — closed ${closed} stale trip(s)`);
+    if (skipped > 0) console.log(`[Reconcile] Done — closed ${closed}, skipped ${skipped} (will retry next cycle)`);
+    else             console.log(`[Reconcile] Done — closed ${closed} stale trip(s)`);
   } catch (err) {
-    console.error('[Reconcile] Error during stale-trip reconciliation:', err.message, err.stack);
+    console.error('[Reconcile] Error:', err.message);
+  } finally {
+    // Restore default lock wait timeout for the connection when it returns to pool
+    try {
+      const { sequelize: db2 } = require('../models');
+      await db2.query('SET SESSION innodb_lock_wait_timeout = 50');
+    } catch (_) {}
   }
 }
 
