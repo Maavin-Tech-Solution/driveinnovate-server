@@ -315,9 +315,10 @@ function isGpsJump(prevLat, prevLng, prevTimeMs, newLat, newLng, newTimeMs) {
 
 // ── Global concurrency limiter ────────────────────────────────────────────────
 // Caps simultaneous processPacket DB sessions so API routes always have
-// connections available.  8 slots × ~6 DB ops each = 48 potential in-flight
-// queries, well within the pool of 40 while leaving headroom for API calls.
-const MAX_CONCURRENT = 8;
+// connections available.  5 slots × ~6 DB ops each = up to 30 in-flight
+// queries from packet processing, leaving the other 15 pool connections
+// free for API routes (login, vehicle list, reports, etc.) at all times.
+const MAX_CONCURRENT = 5;
 let _activePP = 0;
 const _ppWaitQueue = [];
 

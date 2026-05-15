@@ -16,10 +16,10 @@ const sequelize = new Sequelize(
     },
     logging: process.env.NODE_ENV === 'development' ? console.log : false,
     pool: {
-      max: 40,       // total pool — API routes + packet processor share this
-      min: 5,        // keep connections warm so bursts don't pay connect latency
-      acquire: 10000, // fail fast (10 s) — API routes must never hang for 30 s
-      idle: 60000,
+      max: 20,       // conservative — well within MySQL default max_connections (151)
+      min: 0,        // don't pre-open connections on startup
+      acquire: 15000,
+      idle: 30000,
     },
   }
 );
