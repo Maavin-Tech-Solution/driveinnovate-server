@@ -36,6 +36,63 @@ function dateRange(from, to) {
 }
 
 /**
+ * Compute reliable engine-on seconds for a single session row.
+ *
+ * Priority:
+ *   1. durationSeconds  — set when session closes cleanly (most accurate)
+ *   2. drivingSeconds + idleSeconds — accumulated per-packet (good fallback)
+ *   3. endTime - startTime  — wall-clock diff for completed sessions
+ *   4. Date.now() - startTime  — for sessions still 'active' (current session)
+ */
+function sessionDuration(sess, now = Date.now()) {
+  if (sess.durationSeconds != null && sess.durationSeconds > 0) return sess.durationSeconds;
+  const accum = (sess.drivingSeconds || 0) + (sess.idleSeconds || 0);
+  if (accum > 0) return accum;
+  const end = sess.endTime ? new Date(sess.endTime).getTime() : now;
+  const start = new Date(sess.startTime).getTime();
+  return Math.max(0, Math.floor((end - start) / 1000));
+}
+
+/**
+ * Derive parking stops from gaps between consecutive completed trips.
+ *
+ * A parking "stop" is a continuous engine-OFF gap between trips that is
+ * longer than MIN_PARKING_SECS.  The gap is clamped to [from, to] so it
+ * only contributes time that falls within the report window.
+ *
+ * Returns an array of { s, e } ms intervals (same shape as mergeStopIntervals).
+ */
+const MIN_PARKING_SECS = 5 * 60; // 5 min — below this is a traffic stop, not parking
+
+function deriveParkingFromTrips(trips, from, to) {
+  const fromMs = from.getTime();
+  const toMs   = to.getTime();
+
+  // Work only with trips that have a valid endTime
+  const sorted = [...trips]
+    .filter(t => t.startTime && t.endTime)
+    .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+  const stops = [];
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const gapStart = new Date(sorted[i].endTime).getTime();
+    const gapEnd   = new Date(sorted[i + 1].startTime).getTime();
+
+    if (gapEnd <= gapStart) continue; // overlapping/bad data
+    const durSecs = (gapEnd - gapStart) / 1000;
+    if (durSecs < MIN_PARKING_SECS) continue;
+
+    // Clamp to report window
+    const s = Math.max(gapStart, fromMs);
+    const e = Math.min(gapEnd,   toMs);
+    if (e > s) stops.push({ s, e });
+  }
+
+  return stops;
+}
+
+/**
  * Returns the best WHERE clause for querying trips for a vehicle.
  *
  * Tries vehicleId first.  If no trips exist (vehicle was deleted and
@@ -126,18 +183,17 @@ async function getSummary(vehicleId, from, to) {
 
   const tripWhere = await resolveTripWhere(vehicleId, vehicle.imei, from, to);
 
-  const [trips, sessions, parkingStops, fuelFills, fuelDrains] = await Promise.all([
+  const [trips, sessions, fuelFills, fuelDrains] = await Promise.all([
     Trip.findAll({
       where: tripWhere,
-      attributes: ['distance', 'duration', 'avgSpeed', 'maxSpeed', 'fuelConsumed'],
+      attributes: ['startTime', 'endTime', 'distance', 'duration', 'avgSpeed', 'maxSpeed', 'fuelConsumed'],
+      order: [['startTime', 'ASC']],
     }),
+    // Fetch ALL sessions (active + completed) — active sessions are still running
+    // and their durationSeconds will be null; sessionDuration() handles the fallback.
     VehicleEngineSession.findAll({
-      where: { vehicleId, startTime: dateRange(from, to), status: 'completed' },
-      attributes: ['durationSeconds'],
-    }),
-    Stop.findAll({
-      where: overlappingStopsWhere(vehicleId, from, to),
-      attributes: ['startTime', 'endTime', 'duration'],
+      where: { vehicleId, startTime: dateRange(from, to) },
+      attributes: ['startTime', 'endTime', 'durationSeconds', 'drivingSeconds', 'idleSeconds', 'status'],
     }),
     VehicleFuelEvent.findAll({
       where: { vehicleId, eventTime: dateRange(from, to), eventType: 'fill' },
@@ -150,16 +206,19 @@ async function getSummary(vehicleId, from, to) {
   ]);
 
   const totalDistance = trips.reduce((s, t) => s + parseFloat(t.distance || 0), 0);
-  const engineSecs = sessions.reduce((s, e) => s + (e.durationSeconds || 0), 0);
+  const engineSecs    = sessions.reduce((s, e) => s + sessionDuration(e), 0);
   const maxSpeed = trips.reduce((m, t) => Math.max(m, parseFloat(t.maxSpeed || 0)), 0);
   const speedTrips = trips.filter(t => parseFloat(t.avgSpeed) > 0);
   const avgSpeed = speedTrips.length
     ? speedTrips.reduce((s, t) => s + parseFloat(t.avgSpeed), 0) / speedTrips.length
     : 0;
-  const mergedParking = mergeStopIntervals(parkingStops, from, to);
-  const parkingSecs = mergedParking.reduce((s, i) => s + Math.floor((i.e - i.s) / 1000), 0);
-  const totalFilled = fuelFills.reduce((s, f) => s + parseFloat(f.fuelChangePct || 0), 0);
-  const totalDrained = fuelDrains.reduce((s, f) => s + parseFloat(f.fuelChangePct || 0), 0);
+
+  // Parking: derived from gaps between trips (Stop table is not populated by the pipeline)
+  const parkingIntervals = deriveParkingFromTrips(trips, from, to);
+  const parkingSecs      = parkingIntervals.reduce((s, i) => s + Math.floor((i.e - i.s) / 1000), 0);
+
+  const totalFilled   = fuelFills.reduce((s, f) => s + parseFloat(f.fuelChangePct || 0), 0);
+  const totalDrained  = fuelDrains.reduce((s, f) => s + parseFloat(f.fuelChangePct || 0), 0);
   const totalConsumed = trips.reduce((s, t) => s + parseFloat(t.fuelConsumed || 0), 0);
 
   return {
@@ -194,10 +253,13 @@ async function getDailyStats(vehicleId, from, to) {
 
   const tripWhere = await resolveTripWhere(vehicleId, vehicle.imei, from, to);
 
-  const [trips, sessions, parkingStops, fills] = await Promise.all([
+  const [trips, sessions, fills] = await Promise.all([
     Trip.findAll({ where: tripWhere, order: [['startTime', 'ASC']] }),
-    VehicleEngineSession.findAll({ where: { vehicleId, startTime: dateRange(from, to), status: 'completed' }, order: [['startTime', 'ASC']] }),
-    Stop.findAll({ where: overlappingStopsWhere(vehicleId, from, to), order: [['startTime', 'ASC']] }),
+    VehicleEngineSession.findAll({
+      where: { vehicleId, startTime: dateRange(from, to) },
+      attributes: ['startTime', 'endTime', 'durationSeconds', 'drivingSeconds', 'idleSeconds', 'status', 'startFuelLevel', 'endFuelLevel'],
+      order: [['startTime', 'ASC']],
+    }),
     VehicleFuelEvent.findAll({ where: { vehicleId, eventTime: dateRange(from, to), eventType: 'fill' }, order: [['eventTime', 'ASC']] }),
   ]);
 
@@ -217,14 +279,15 @@ async function getDailyStats(vehicleId, from, to) {
   sessions.forEach(e => {
     const k = dayKey(e.startTime);
     ensureDay(k);
-    dayMap[k].engineSecs += e.durationSeconds || 0;
+    // Use reliable duration fallback chain instead of durationSeconds alone
+    dayMap[k].engineSecs += sessionDuration(e);
     if (dayMap[k].fuelStart === null) dayMap[k].fuelStart = parseFloat(e.startFuelLevel || 0);
     dayMap[k].fuelEnd = parseFloat(e.endFuelLevel ?? dayMap[k].fuelEnd ?? 0);
   });
-  // Merge overlapping stops before distributing — prevents double-counting
-  // when multiple stop rows cover the same parking period.
-  mergeStopIntervals(parkingStops, from, to).forEach(({ s: stopStart, e: stopEnd }) => {
-    // Distribute the merged interval across every IST calendar day it spans.
+
+  // Parking: derive from trip gaps — Stop table is not populated by the pipeline.
+  deriveParkingFromTrips(trips, from, to).forEach(({ s: stopStart, e: stopEnd }) => {
+    // Distribute the parking interval across every IST calendar day it spans.
     let cursor = stopStart;
     let counted = false;
     while (cursor < stopEnd) {
@@ -234,17 +297,16 @@ async function getDailyStats(vehicleId, from, to) {
       ) - IST_OFFSET_MS);
       const istDayEnd   = new Date(istDayStart.getTime() + 24 * 60 * 60 * 1000);
 
-      const sliceStart = Math.max(cursor,     from.getTime(), istDayStart.getTime());
-      const sliceEnd   = Math.min(stopEnd, to.getTime(),   istDayEnd.getTime());
+      const sliceStart = Math.max(cursor,   from.getTime(), istDayStart.getTime());
+      const sliceEnd   = Math.min(stopEnd,  to.getTime(),   istDayEnd.getTime());
       const sliceSecs  = Math.max(0, Math.floor((sliceEnd - sliceStart) / 1000));
 
       if (sliceSecs > 0) {
         const k = dayKey(sliceStart);
         ensureDay(k);
-        dayMap[k].parkingSecs += sliceSecs;
+        dayMap[k].parkingSecs  += sliceSecs;
         if (!counted) { dayMap[k].parkingCount += 1; counted = true; }
       }
-
       cursor = istDayEnd.getTime();
     }
   });

@@ -313,6 +313,32 @@ function isGpsJump(prevLat, prevLng, prevTimeMs, newLat, newLng, newTimeMs) {
   return impliedKph > MAX_JUMP_KPH;
 }
 
+// ── Retry wrapper for transient DB timeouts ───────────────────────────────────
+const RETRY_DELAYS = [500, 1500, 4000]; // 3 attempts: 0.5 s, 1.5 s, 4 s
+
+function isTransientError(err) {
+  const msg = (err.message || '').toLowerCase();
+  return msg.includes('timeout') || msg.includes('deadlock') ||
+         msg.includes('lock wait') || msg.includes('econnreset') ||
+         msg.includes('connection lost');
+}
+
+async function withRetry(fn, label) {
+  for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt < RETRY_DELAYS.length && isTransientError(err)) {
+        const delay = RETRY_DELAYS[attempt];
+        console.warn(`[PP] ${label} transient error (attempt ${attempt + 1}/${RETRY_DELAYS.length + 1}): ${err.message} — retrying in ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 // ── Main processor ────────────────────────────────────────────────────────────
 /**
  * @param {object}  doc        Raw MongoDB document
@@ -323,7 +349,7 @@ function isGpsJump(prevLat, prevLng, prevTimeMs, newLat, newLng, newTimeMs) {
  *                             concurrent live-packet processing).
  * @returns {object|undefined} The state instance (when _state was provided)
  */
-async function processPacket(doc, deviceType, _state) {
+async function processPacketInner(doc, deviceType, _state) {
   try {
     if (!doc?.imei) return _state;
 
@@ -838,9 +864,11 @@ const STALE_THRESHOLD_MS = 15 * 60 * 1000;
 
 async function reconcileStaleTrips() {
   try {
+    // Read-only scan — no locks held during the loop itself
     const staleTrips = await Trip.findAll({
       where: { status: 'in_progress' },
       attributes: ['id', 'vehicleId', 'startTime', 'endTime'],
+      lock: false,          // advisory read — avoids lock contention with processPacket
     });
 
     if (!staleTrips.length) {
@@ -852,46 +880,56 @@ async function reconcileStaleTrips() {
     let closed = 0;
 
     for (const trip of staleTrips) {
-      const state = await VehicleDeviceState.findOne({ where: { vehicleId: trip.vehicleId } });
+      try {
+        const state = await VehicleDeviceState.findOne({
+          where: { vehicleId: trip.vehicleId },
+          lock: false,
+        });
 
-      const endTimeMs    = trip.endTime ? new Date(trip.endTime).getTime() : null;
-      const staleSinceMs = endTimeMs ? Date.now() - endTimeMs : null;
-      const isStale      = staleSinceMs !== null && staleSinceMs > STALE_THRESHOLD_MS;
+        const endTimeMs    = trip.endTime ? new Date(trip.endTime).getTime() : null;
+        const staleSinceMs = endTimeMs ? Date.now() - endTimeMs : null;
+        const isStale      = staleSinceMs !== null && staleSinceMs > STALE_THRESHOLD_MS;
 
-      console.log(
-        `[Reconcile] trip #${trip.id} vid=${trip.vehicleId}` +
-        ` endTime=${trip.endTime ? new Date(trip.endTime).toISOString() : 'NULL'}` +
-        ` staleMin=${staleSinceMs !== null ? (staleSinceMs / 60000).toFixed(1) : 'N/A'}` +
-        ` state.currentTripId=${state?.currentTripId ?? 'NO_STATE'}` +
-        ` state.engineOn=${state?.engineOn ?? 'NO_STATE'}` +
-        ` isStale=${isStale}`
-      );
+        const shouldClose =
+          !state ||
+          state.currentTripId !== trip.id ||
+          (state.currentTripId === trip.id && !state.engineOn) ||
+          isStale;
 
-      const shouldClose =
-        !state ||
-        state.currentTripId !== trip.id ||
-        (state.currentTripId === trip.id && !state.engineOn) ||
-        isStale;
+        if (!shouldClose) continue;
 
-      if (!shouldClose) {
-        console.log(`[Reconcile] trip #${trip.id} — skipping (no rule matched)`);
-        continue;
+        const endTime = trip.endTime || state?.lastPacketTime || new Date();
+        const durationSec = Math.max(
+          0,
+          Math.floor((new Date(endTime).getTime() - new Date(trip.startTime).getTime()) / 1000)
+        );
+
+        // Use WHERE-clause UPDATE — atomic single statement, holds lock for
+        // microseconds instead of across a read-modify-write cycle.
+        // Only updates if the row is still in_progress (guards against a race
+        // where processPacket already closed it between our read and this write).
+        const [affected] = await Trip.update(
+          { status: 'completed', endTime, duration: durationSec },
+          { where: { id: trip.id, status: 'in_progress' } }
+        );
+
+        if (affected) {
+          // Clear state pointer — best-effort, packet processor fixes it on next packet
+          if (state?.currentTripId === trip.id) {
+            try {
+              await VehicleDeviceState.update(
+                { currentTripId: null },
+                { where: { vehicleId: trip.vehicleId, currentTripId: trip.id } }
+              );
+            } catch (_) { /* non-fatal — processor will correct on next packet */ }
+          }
+          console.log(`[Reconcile] Closed stale trip #${trip.id} (vehicle ${trip.vehicleId}, ${durationSec}s)`);
+          closed++;
+        }
+      } catch (tripErr) {
+        // Per-trip error: log and continue — don't abort the whole reconcile run
+        console.warn(`[Reconcile] Skipped trip #${trip.id}: ${tripErr.message}`);
       }
-
-      const endTime = trip.endTime || state?.lastPacketTime || new Date();
-      const durationSec = Math.max(
-        0,
-        Math.floor((new Date(endTime).getTime() - new Date(trip.startTime).getTime()) / 1000)
-      );
-
-      await trip.update({ status: 'completed', endTime, duration: durationSec });
-
-      if (state?.currentTripId === trip.id) {
-        await state.update({ currentTripId: null, engineOn: false });
-      }
-
-      console.log(`[Reconcile] Closed stale trip #${trip.id} (vehicle ${trip.vehicleId}, ${durationSec}s)`);
-      closed++;
     }
 
     console.log(`[Reconcile] Done — closed ${closed} stale trip(s)`);
@@ -1134,6 +1172,14 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
   console.log(`[Reprocess] Vehicle ${vehicleId} done — ${processed} packets → ${tripCount} trips`);
 
   return { processed, tripsCreated: tripCount, aborted: false };
+}
+
+// Public wrapper — retries transient DB timeouts automatically
+async function processPacket(doc, deviceType, _state) {
+  return withRetry(
+    () => processPacketInner(doc, deviceType, _state),
+    `imei=${doc?.imei}`
+  );
 }
 
 module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips, catchUpMissedPackets, reprocessVehicle };

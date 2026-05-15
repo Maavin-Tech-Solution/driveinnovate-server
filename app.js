@@ -270,6 +270,23 @@ function triggerCatchup(reason) {
   );
 }
 
+// ── Per-vehicle serialisation queues ─────────────────────────────────────────
+// Each IMEI gets a promise-chain so packets for the same vehicle are processed
+// one at a time.  Different vehicles still run in parallel, giving us the
+// throughput we need without the pool exhaustion caused by concurrent writes
+// to the same VehicleDeviceState / Trip rows.
+const _vehicleQueues = new Map(); // imei → Promise (tail of the chain)
+
+function enqueuePacket(imei, fn) {
+  const tail   = _vehicleQueues.get(imei) || Promise.resolve();
+  const next   = tail.then(fn).catch(() => {}); // errors handled inside fn
+  _vehicleQueues.set(imei, next);
+  // Prune resolved entries so the Map doesn't grow forever
+  next.finally(() => {
+    if (_vehicleQueues.get(imei) === next) _vehicleQueues.delete(imei);
+  });
+}
+
 function watchCollection(colName, deviceType, retryMs = 5000) {
   let stream;
   try {
@@ -281,14 +298,17 @@ function watchCollection(colName, deviceType, retryMs = 5000) {
       fullDocument: 'updateLookup',
     });
 
-    stream.on('change', async (event) => {
+    stream.on('change', (event) => {
       const doc = event.fullDocument;
-      if (doc) {
-        console.log(`[ChangeStream:${colName}] insert imei=${doc.imei}`);
-        await processPacket(doc, deviceType).catch((err) =>
+      if (!doc) return;
+      const imei = doc.imei || 'unknown';
+      console.log(`[ChangeStream:${colName}] insert imei=${imei}`);
+      // Serialise per-vehicle — prevents concurrent DB writes to the same rows
+      enqueuePacket(imei, () =>
+        processPacket(doc, deviceType).catch((err) =>
           console.error(`[ChangeStream:${colName}] processPacket error:`, err.message)
-        );
-      }
+        )
+      );
     });
 
     const scheduleRetry = (err) => {

@@ -16,10 +16,10 @@ const sequelize = new Sequelize(
     },
     logging: process.env.NODE_ENV === 'development' ? console.log : false,
     pool: {
-      max: 10,
-      min: 0,
-      acquire: 30000,
-      idle: 10000,
+      max: 30,       // was 10 — allow more concurrent operations across vehicles
+      min: 2,        // keep a few connections warm
+      acquire: 20000, // fail faster (was 30s) so errors surface quickly
+      idle: 30000,   // keep connections alive longer between packets
     },
   }
 );
