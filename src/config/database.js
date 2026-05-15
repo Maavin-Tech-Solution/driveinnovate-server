@@ -16,10 +16,10 @@ const sequelize = new Sequelize(
     },
     logging: process.env.NODE_ENV === 'development' ? console.log : false,
     pool: {
-      max: 30,       // was 10 — allow more concurrent operations across vehicles
-      min: 2,        // keep a few connections warm
-      acquire: 20000, // fail faster (was 30s) so errors surface quickly
-      idle: 30000,   // keep connections alive longer between packets
+      max: 40,       // total pool — API routes + packet processor share this
+      min: 5,        // keep connections warm so bursts don't pay connect latency
+      acquire: 10000, // fail fast (10 s) — API routes must never hang for 30 s
+      idle: 60000,
     },
   }
 );

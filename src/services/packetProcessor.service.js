@@ -313,8 +313,27 @@ function isGpsJump(prevLat, prevLng, prevTimeMs, newLat, newLng, newTimeMs) {
   return impliedKph > MAX_JUMP_KPH;
 }
 
+// ── Global concurrency limiter ────────────────────────────────────────────────
+// Caps simultaneous processPacket DB sessions so API routes always have
+// connections available.  8 slots × ~6 DB ops each = 48 potential in-flight
+// queries, well within the pool of 40 while leaving headroom for API calls.
+const MAX_CONCURRENT = 8;
+let _activePP = 0;
+const _ppWaitQueue = [];
+
+function _acquireSlot() {
+  return new Promise(resolve => {
+    if (_activePP < MAX_CONCURRENT) { _activePP++; resolve(); }
+    else _ppWaitQueue.push(resolve);
+  });
+}
+function _releaseSlot() {
+  if (_ppWaitQueue.length > 0) { _ppWaitQueue.shift()(); }
+  else _activePP--;
+}
+
 // ── Retry wrapper for transient DB timeouts ───────────────────────────────────
-const RETRY_DELAYS = [500, 1500, 4000]; // 3 attempts: 0.5 s, 1.5 s, 4 s
+const RETRY_DELAYS = [300, 1000, 3000];
 
 function isTransientError(err) {
   const msg = (err.message || '').toLowerCase();
@@ -323,15 +342,30 @@ function isTransientError(err) {
          msg.includes('connection lost');
 }
 
+// Suppress noisy per-packet timeout log — only print a summary every 60 s
+let _transientErrCount = 0;
+let _transientErrTimer = null;
+function _noteTransient(label, msg) {
+  _transientErrCount++;
+  if (!_transientErrTimer) {
+    _transientErrTimer = setTimeout(() => {
+      if (_transientErrCount > 0)
+        console.warn(`[PP] ${_transientErrCount} transient DB error(s) in last 60 s (last: ${label}: ${msg})`);
+      _transientErrCount = 0;
+      _transientErrTimer = null;
+    }, 60_000);
+    _transientErrTimer.unref?.();
+  }
+}
+
 async function withRetry(fn, label) {
   for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
     try {
       return await fn();
     } catch (err) {
       if (attempt < RETRY_DELAYS.length && isTransientError(err)) {
-        const delay = RETRY_DELAYS[attempt];
-        console.warn(`[PP] ${label} transient error (attempt ${attempt + 1}/${RETRY_DELAYS.length + 1}): ${err.message} — retrying in ${delay}ms`);
-        await new Promise(r => setTimeout(r, delay));
+        _noteTransient(label, err.message);
+        await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
       } else {
         throw err;
       }
@@ -1205,12 +1239,17 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
   return { processed, tripsCreated: tripCount, aborted: false };
 }
 
-// Public wrapper — retries transient DB timeouts automatically
+// Public wrapper — enforces concurrency limit + retries transient timeouts
 async function processPacket(doc, deviceType, _state) {
-  return withRetry(
-    () => processPacketInner(doc, deviceType, _state),
-    `imei=${doc?.imei}`
-  );
+  await _acquireSlot();
+  try {
+    return await withRetry(
+      () => processPacketInner(doc, deviceType, _state),
+      `imei=${doc?.imei}`
+    );
+  } finally {
+    _releaseSlot();
+  }
 }
 
 module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips, catchUpMissedPackets, reprocessVehicle };
