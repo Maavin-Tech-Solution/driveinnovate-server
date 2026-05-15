@@ -878,9 +878,13 @@ async function processPacketInner(doc, deviceType, _state) {
     if (err.name === 'SequelizeForeignKeyConstraintError' && doc?.imei) {
       invalidateVehicleCache(doc.imei);
       console.warn(`[PP] FK violation for IMEI ${doc.imei} — cache cleared`);
-    } else {
-      console.error('[PP] Error processing packet:', err.message);
+      return _state ? _state : undefined;
     }
+    // Re-throw transient DB errors (lock timeout, deadlock) so withRetry
+    // can retry them.  Previously ALL errors were swallowed here, making the
+    // retry wrapper completely ineffective.
+    if (isTransientError(err)) throw err;
+    console.error('[PP] Error processing packet:', err.message);
     return _state ? _state : undefined;
   }
 }
@@ -1252,5 +1256,15 @@ async function processPacket(doc, deviceType, _state) {
     _releaseSlot();
   }
 }
+
+// Keep processPacket's lock wait short so it fails fast and retries rather
+// than hanging for MySQL's default 50 s.  Run once at startup — applies to
+// every connection Sequelize checks out of the pool.
+const { sequelize: _db } = require('../models');
+_db.afterConnect(async (connection) => {
+  try {
+    await connection.query('SET SESSION innodb_lock_wait_timeout = 5');
+  } catch (_) { /* ignore on MySQL versions that don't support it */ }
+});
 
 module.exports = { processPacket, invalidateVehicleCache, reconcileStaleTrips, catchUpMissedPackets, reprocessVehicle };
