@@ -25,7 +25,7 @@ const { getCapabilities }               = require('../config/deviceCapabilities'
 
 const OFFLINE_SECONDS  = 600;    // 10 min
 const OVERSPEED_KMPH   = 80;
-const RUNNING_STREAK   = 3;      // consecutive GPS-confirmed movement packets
+const RUNNING_STREAK   = 1;      // GPS-confirmed movement packets needed to enter Running state
 const IDLE_ZERO_SECS   = 180;    // 3 min stationary with engine on → Idle
 
 const SHARED_DEFAULTS = [
@@ -42,7 +42,7 @@ const SHARED_DEFAULTS = [
     isDefault: false,
   },
   {
-    // runningStreak is GPS-confirmed movement: 3 consecutive packets with
+    // runningStreak is GPS-confirmed movement: 1+ packet with
     // speed > 5 km/h AND implied speed (haversine / interval) > 5 km/h.
     // Ignition is NOT in the streak condition — AIS140 devices often report
     // ignition=0 even while driving (unwired ignition line).  The speed+GPS

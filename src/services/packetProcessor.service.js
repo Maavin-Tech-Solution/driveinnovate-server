@@ -1262,8 +1262,10 @@ async function processPacket(doc, deviceType, _state) {
 // every connection Sequelize checks out of the pool.
 const { sequelize: _db } = require('../models');
 _db.afterConnect(async (connection) => {
+  // `connection` here is the raw mysql2 connection (callback-style), not the
+  // Promise-wrapped one. `.promise()` returns the Promise wrapper so we can await.
   try {
-    await connection.query('SET SESSION innodb_lock_wait_timeout = 5');
+    await connection.promise().query('SET SESSION innodb_lock_wait_timeout = 5');
   } catch (_) { /* ignore on MySQL versions that don't support it */ }
 });
 

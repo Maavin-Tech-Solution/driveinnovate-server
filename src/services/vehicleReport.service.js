@@ -234,7 +234,7 @@ async function getSummary(vehicleId, from, to) {
     avgSpeedInTrips: parseFloat(avgSpeed.toFixed(6)),
     parkingTime: secsToHMS(parkingSecs),
     parkingTimeSecs: parkingSecs,
-    parkingsCount: mergedParking.length,
+    parkingsCount: parkingIntervals.length,
     totalFilled: parseFloat(totalFilled.toFixed(2)),
     totalFillings: fuelFills.length,
     totalDrained: parseFloat(totalDrained.toFixed(2)),
