@@ -1103,62 +1103,35 @@ const getLocationPlayerData = async (id, callerClientIds, from, to, limit = 1000
  * GT06 ignition: engineOn already computed with speed-based logic by processPacket.
  */
 const getLivePositions = async (clientId, since) => {
+  // Use the SAME comprehensive data path as getVehicles/syncVehicleData so the
+  // 5-second poll, the per-vehicle sync, and the initial page load all return
+  // identical shapes.  Previously this endpoint read only MySQL VehicleDeviceState
+  // (state.lastLat/lng), which lags MongoDB whenever packetProcessor is backed up
+  // — that caused the map markers, hover tooltips, and list popovers to display
+  // stale coords while the click drawer (which auto-fires syncVehicleData) showed
+  // fresh ones.  Single source of truth eliminates the drift.
   const vehicles = await Vehicle.findAll({
     where: { clientId, status: { [Op.ne]: 'deleted' } },
-    attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
+    include: [{ model: RtoDetail, as: 'rtoDetail' }],
   });
-  const vehicleIds = vehicles.map(v => v.id);
-  if (!vehicleIds.length) return [];
+  if (!vehicles.length) return [];
 
-  // When `since` is provided, only fetch states whose lastSeenAt advanced
-  // since then.  Filtering by lastSeenAt (real packet processing time) instead
-  // of updatedAt means reconcileStaleTrips and other background updates do NOT
-  // bring an offline vehicle back into the live poll — only a real packet does.
-  const stateWhere = { vehicleId: vehicleIds };
+  const enriched = await Promise.all(vehicles.map(v => attachComprehensiveStatus(v)));
+
+  // Differential: when `since` is given, only return vehicles whose lastUpdate
+  // advanced past it.  lastUpdate is set to state.lastSeenAt (real server UTC
+  // at packet-processing time), so background jobs that bump updatedAt do not
+  // falsely mark a silent vehicle as fresh.
   if (since) {
-    const sinceDate = new Date(since);
-    if (!isNaN(sinceDate)) stateWhere.lastSeenAt = { [Op.gt]: sinceDate };
+    const sinceMs = new Date(since).getTime();
+    if (!isNaN(sinceMs)) {
+      return enriched.filter(v => {
+        const ts = v.deviceStatus?.lastUpdate;
+        return ts && new Date(ts).getTime() > sinceMs;
+      });
+    }
   }
-
-  const states = await VehicleDeviceState.findAll({
-    where: stateWhere,
-    attributes: [
-      'vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn',
-      'lastPacketTime', 'updatedAt', 'lastSeenAt',
-      'speedZeroSince', 'engineOffSince', 'runningStreak', 'lastMovement',
-    ],
-  });
-
-  // Build a lookup of vehicle metadata
-  const vehicleMap = new Map(vehicles.map(v => [v.id, v]));
-
-  return states.map(s => {
-    const v = vehicleMap.get(s.vehicleId);
-    if (!v) return null;
-    return {
-      id: v.id,
-      vehicleNumber: v.vehicleNumber,
-      deviceType: v.deviceType,
-      vehicleIcon: v.vehicleIcon,
-      lat: s.lastLat ? parseFloat(s.lastLat) : null,
-      lng: s.lastLng ? parseFloat(s.lastLng) : null,
-      speed: s.lastSpeed ?? 0,
-      engineOn: s.engineOn ?? false,
-      lastPacketTime:   s.lastPacketTime ?? null,
-      // lastSeenAt: real server UTC of last packet processing — strictly this,
-      // no updatedAt fallback (reconcile bumps it artificially).
-      lastSeenAt:       s.lastSeenAt ?? null,
-      updatedAt:        s.updatedAt ?? null,
-      speedZeroSince:   s.speedZeroSince ?? null,
-      engineOffSince:   s.engineOffSince ?? null,
-      runningStreak:    (() => {
-        const ts  = s.lastSeenAt || s.updatedAt;
-        const age = ts ? (Date.now() - new Date(ts).getTime()) : Infinity;
-        return age > 90_000 ? 0 : (s.runningStreak ?? 0);
-      })(),
-      movement:         s.lastMovement ?? null,
-    };
-  }).filter(Boolean);
+  return enriched;
 };
 
 module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions };
