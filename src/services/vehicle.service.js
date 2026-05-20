@@ -1110,28 +1110,19 @@ const getLivePositions = async (clientId, since) => {
   // — that caused the map markers, hover tooltips, and list popovers to display
   // stale coords while the click drawer (which auto-fires syncVehicleData) showed
   // fresh ones.  Single source of truth eliminates the drift.
+  //
+  // The `since` parameter is intentionally ignored.  It previously filtered on
+  // state.lastSeenAt — but when packetProcessor is backed up, lastSeenAt does
+  // not advance even while MongoDB receives fresh packets, so a since-filter
+  // hides the very updates we need to surface.  Returning the full snapshot
+  // every poll keeps the UI honest; for normal fleet sizes the cost is fine.
   const vehicles = await Vehicle.findAll({
     where: { clientId, status: { [Op.ne]: 'deleted' } },
     include: [{ model: RtoDetail, as: 'rtoDetail' }],
   });
   if (!vehicles.length) return [];
 
-  const enriched = await Promise.all(vehicles.map(v => attachComprehensiveStatus(v)));
-
-  // Differential: when `since` is given, only return vehicles whose lastUpdate
-  // advanced past it.  lastUpdate is set to state.lastSeenAt (real server UTC
-  // at packet-processing time), so background jobs that bump updatedAt do not
-  // falsely mark a silent vehicle as fresh.
-  if (since) {
-    const sinceMs = new Date(since).getTime();
-    if (!isNaN(sinceMs)) {
-      return enriched.filter(v => {
-        const ts = v.deviceStatus?.lastUpdate;
-        return ts && new Date(ts).getTime() > sinceMs;
-      });
-    }
-  }
-  return enriched;
+  return await Promise.all(vehicles.map(v => attachComprehensiveStatus(v)));
 };
 
 module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions };
