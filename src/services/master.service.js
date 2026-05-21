@@ -51,7 +51,7 @@ const SHARED_DEFAULTS = [
     stateName: 'Running',
     stateColor: '#16A34A', stateIcon: '🟢', priority: 30, conditionLogic: 'OR',
     conditions: [
-      { field: 'runningStreak', operator: 'gte', value: 3    },
+      { field: 'runningStreak', operator: 'gte', value: RUNNING_STREAK },
       { field: 'movement',      operator: 'eq',  value: true },
     ],
     isDefault: false,
