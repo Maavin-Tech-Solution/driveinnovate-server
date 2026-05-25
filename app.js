@@ -145,7 +145,7 @@ sequelize
     return sequelize.sync({ alter: false });
   })
   .then(() => runMigrations())
-  .then(() => reconcileStaleTrips())
+  // .then(() => reconcileStaleTrips())
   .then(() => seedBuiltIns().then(() => console.log('✓ Built-in device configs seeded')))
   .then(() => {
     console.log('Attempting MongoDB connection for GPS data...');
