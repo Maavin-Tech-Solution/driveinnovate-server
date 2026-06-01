@@ -28,6 +28,7 @@ const MIGRATIONS = [
   { table: 'vehicle_device_states', column: 'last_gps_packet_time',  ddl: 'DATETIME(6) NULL COMMENT "Time of last GPS-bearing packet"' },
   { table: 'vehicle_device_states', column: 'speed_zero_since',      ddl: 'DATETIME(6) NULL COMMENT "When speed last became 0; cleared on speed>0. Drives Idle 4-min rule"' },
   { table: 'vehicle_device_states', column: 'running_streak',        ddl: 'TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT "Consecutive packets with speed>5. Drives Running 3-packets rule"' },
+  { table: 'vehicle_device_states', column: 'first_seen_at', ddl: 'DATETIME NULL COMMENT "Real server UTC when the first packet was ever processed"' },
   { table: 'vehicle_device_states', column: 'last_seen_at',          ddl: 'DATETIME(6) NULL COMMENT "Real server UTC at last packet processing — never bumped by reconcile/migrations"' },
   { table: 'vehicle_device_states', column: 'last_movement',         ddl: 'TINYINT(1) NULL COMMENT "AIS140 movement sensor: 1=moving, 0=stationary, NULL=device has no movement sensor"' },
 
@@ -60,8 +61,9 @@ const MIGRATIONS = [
 
   // ── di_user_vehicle (per-vehicle subscription expiry + optional SIMs) ────
   { table: 'di_user_vehicle', column: 'subscription_expires_at', ddl: 'DATETIME NULL COMMENT "Billable subscription expiry per vehicle"' },
-  { table: 'di_user_vehicle', column: 'sim1', ddl: 'VARCHAR(30) NULL COMMENT "Primary SIM number in the GPS device (optional)"' },
-  { table: 'di_user_vehicle', column: 'sim2', ddl: 'VARCHAR(30) NULL COMMENT "Secondary SIM number in the GPS device (optional)"' },
+  { table: 'di_user_vehicle', column: 'sim1',   ddl: 'VARCHAR(30) NULL COMMENT "Primary SIM number in the GPS device (optional)"' },
+  { table: 'di_user_vehicle', column: 'sim2',   ddl: 'VARCHAR(30) NULL COMMENT "Secondary SIM number in the GPS device (optional)"' },
+  { table: 'di_user_vehicle', column: 'branch', ddl: 'VARCHAR(100) NULL COMMENT "Branch or depot the vehicle belongs to (optional)"' },
   { table: 'di_user_vehicle', column: 'fuel_supported',      ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "True if vehicle has a fuel-level sensor wired (FMB only)"' },
   { table: 'di_user_vehicle', column: 'fuel_tank_capacity',  ddl: 'INT NULL COMMENT "Tank capacity in litres (required when fuel_supported=1)"' },
 

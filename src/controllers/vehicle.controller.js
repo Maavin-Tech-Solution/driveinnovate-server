@@ -48,7 +48,7 @@ const getVehicleById = async (req, res) => {
 const addVehicle = async (req, res) => {
   try {
     const {
-      vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2,
+      vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, branch,
       deviceName, deviceType, serverIp, serverPort, vehicleIcon,
       fuelSupported, fuelTankCapacity,
       forClientId,
@@ -69,7 +69,8 @@ const addVehicle = async (req, res) => {
     }
 
     const vehicle = await vehicleService.addVehicle(effectiveClientId, {
-      vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, deviceName, deviceType, serverIp, serverPort, vehicleIcon,
+      vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, branch,
+      deviceName, deviceType, serverIp, serverPort, vehicleIcon,
       fuelSupported, fuelTankCapacity,
     });
     return res.status(201).json({ success: true, message: 'Vehicle registered successfully', data: vehicle });

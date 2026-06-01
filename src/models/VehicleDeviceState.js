@@ -119,6 +119,10 @@ const VehicleDeviceState = sequelize.define('VehicleDeviceState', {
   // mutation including reconcileStaleTrips) and from lastPacketTime (device
   // time, possibly wrong timezone).  This is the single authoritative field
   // for "when did we last hear from this device?" used by lastSeenSeconds.
+  firstSeenAt: {
+    type: DataTypes.DATE, allowNull: true, field: 'first_seen_at',
+    comment: 'Real server UTC when the FIRST packet was ever processed for this device',
+  },
   lastSeenAt: {
     type: DataTypes.DATE, allowNull: true, field: 'last_seen_at',
     comment: 'Real server UTC at last packet processing — never bumped by reconcile/migrations',

@@ -858,7 +858,10 @@ async function processPacketInner(doc, deviceType, _state) {
     // This is the authoritative field for "when did we last hear from this
     // device".  Unlike updatedAt it is NOT bumped by reconcileStaleTrips.
     // Unlike lastPacketTime it is NOT subject to device-clock timezone errors.
-    state.lastSeenAt        = new Date();
+    const now = new Date();
+    state.lastSeenAt        = now;
+    // Record the very first packet time — never overwrite once set
+    if (!state.firstSeenAt) state.firstSeenAt = now;
     state.currentTripId     = state.currentTripId    || null;
     state.currentSessionId  = state.currentSessionId || null;
     state.pendingTripEnd    = false;

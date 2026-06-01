@@ -40,6 +40,11 @@ const Vehicle = sequelize.define(
       allowNull: true,
       comment: 'Secondary SIM number in the GPS device (optional)',
     },
+    branch: {
+      type: DataTypes.STRING(100),
+      allowNull: true,
+      comment: 'Branch or depot the vehicle belongs to (optional)',
+    },
     clientId: {
       type: DataTypes.INTEGER,
       allowNull: false,

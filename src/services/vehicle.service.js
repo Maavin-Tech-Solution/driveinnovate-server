@@ -669,7 +669,7 @@ const attachComprehensiveStatus = async (vehicle) => {
     VehicleDeviceState.findOne({
       where: { vehicleId: vehicleJson.id },
       attributes: ['engineOn', 'lastPacketTime', 'lastLat', 'lastLng', 'lastSpeed', 'lastAltitude', 'lastSatellites', 'lastCourse',
-                   'engineOffSince', 'speedZeroSince', 'runningStreak'],
+                   'engineOffSince', 'speedZeroSince', 'runningStreak', 'firstSeenAt', 'lastSeenAt', 'lastMovement'],
     }),
   ]);
 
@@ -778,6 +778,24 @@ const attachComprehensiveStatus = async (vehicle) => {
     }
   }
 
+  // Registration date — Sequelize with underscored:true outputs registered_at
+  vehicleJson.registeredAt = vehicleJson.registered_at || vehicleJson.createdAt || null;
+
+  // First data packet — prefer MySQL firstSeenAt, fall back to querying MongoDB
+  let firstSeenAt = (state && state.firstSeenAt) ? state.firstSeenAt : null;
+  if (!firstSeenAt && vehicleJson.imei && isMongoDBConnected()) {
+    try {
+      const LocationModel = getLocationModel(vehicleJson.deviceType);
+      const imeiVariations = [vehicleJson.imei, vehicleJson.imei.startsWith('0') ? vehicleJson.imei.substring(1) : `0${vehicleJson.imei}`];
+      const firstPkt = await LocationModel.findOne({ imei: { $in: imeiVariations } })
+        .sort({ timestamp: 1 })
+        .select('timestamp')
+        .lean();
+      if (firstPkt?.timestamp) firstSeenAt = firstPkt.timestamp;
+    } catch (_) { /* silent */ }
+  }
+  vehicleJson.firstSeenAt = firstSeenAt;
+
   return { ...vehicleJson, deviceStatus };
 };
 
@@ -821,7 +839,7 @@ const getVehicleById = async (id, callerClientIds) => {
   return await attachGpsData(vehicle);
 };
 
-const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, deviceName, deviceType, serverIp, serverPort, vehicleIcon, fuelSupported, fuelTankCapacity }) => {
+const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, branch, deviceName, deviceType, serverIp, serverPort, vehicleIcon, fuelSupported, fuelTankCapacity }) => {
   if (vehicleNumber) {
     const existing = await Vehicle.findOne({ where: { vehicleNumber: vehicleNumber.toUpperCase() } });
     if (existing) {
@@ -843,8 +861,9 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
     chasisNumber,
     engineNumber,
     imei,
-    sim1: sim1 || null,
-    sim2: sim2 || null,
+    sim1:   sim1   || null,
+    sim2:   sim2   || null,
+    branch: branch || null,
     deviceName: deviceName || null,
     deviceType: deviceType || null,
     serverIp: serverIp || null,
@@ -1103,26 +1122,58 @@ const getLocationPlayerData = async (id, callerClientIds, from, to, limit = 1000
  * GT06 ignition: engineOn already computed with speed-based logic by processPacket.
  */
 const getLivePositions = async (clientId, since) => {
-  // Use the SAME comprehensive data path as getVehicles/syncVehicleData so the
-  // 5-second poll, the per-vehicle sync, and the initial page load all return
-  // identical shapes.  Previously this endpoint read only MySQL VehicleDeviceState
-  // (state.lastLat/lng), which lags MongoDB whenever packetProcessor is backed up
-  // — that caused the map markers, hover tooltips, and list popovers to display
-  // stale coords while the click drawer (which auto-fires syncVehicleData) showed
-  // fresh ones.  Single source of truth eliminates the drift.
-  //
-  // The `since` parameter is intentionally ignored.  It previously filtered on
-  // state.lastSeenAt — but when packetProcessor is backed up, lastSeenAt does
-  // not advance even while MongoDB receives fresh packets, so a since-filter
-  // hides the very updates we need to surface.  Returning the full snapshot
-  // every poll keeps the UI honest; for normal fleet sizes the cost is fine.
+  // Lightweight MySQL-only poll — no MongoDB queries per vehicle.
+  // Returns only the fields the map/list poll needs: position, speed,
+  // ignition state and streak.  Full device status (fuel, battery, sensors)
+  // is loaded on demand via syncVehicleData when the user opens a vehicle.
   const vehicles = await Vehicle.findAll({
     where: { clientId, status: { [Op.ne]: 'deleted' } },
-    include: [{ model: RtoDetail, as: 'rtoDetail' }],
+    attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
   });
-  if (!vehicles.length) return [];
+  const vehicleIds = vehicles.map(v => v.id);
+  if (!vehicleIds.length) return [];
 
-  return await Promise.all(vehicles.map(v => attachComprehensiveStatus(v)));
+  const stateWhere = { vehicleId: vehicleIds };
+  if (since) {
+    const sinceDate = new Date(since);
+    if (!isNaN(sinceDate)) stateWhere.lastSeenAt = { [Op.gt]: sinceDate };
+  }
+
+  const states = await VehicleDeviceState.findAll({
+    where: stateWhere,
+    attributes: [
+      'vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn',
+      'lastPacketTime', 'updatedAt', 'lastSeenAt', 'firstSeenAt',
+      'speedZeroSince', 'engineOffSince', 'runningStreak', 'lastMovement',
+    ],
+  });
+
+  const vehicleMap = new Map(vehicles.map(v => [v.id, v]));
+
+  return states.map(s => {
+    const v = vehicleMap.get(s.vehicleId);
+    if (!v) return null;
+    const ts  = s.lastSeenAt || s.updatedAt;
+    const age = ts ? (Date.now() - new Date(ts).getTime()) : Infinity;
+    return {
+      id:            v.id,
+      vehicleNumber: v.vehicleNumber,
+      deviceType:    v.deviceType,
+      vehicleIcon:   v.vehicleIcon,
+      lat:           s.lastLat  ? parseFloat(s.lastLat)  : null,
+      lng:           s.lastLng  ? parseFloat(s.lastLng)  : null,
+      speed:         s.lastSpeed ?? 0,
+      engineOn:      s.engineOn ?? false,
+      firstSeenAt:   s.firstSeenAt ?? null,
+      lastSeenAt:    s.lastSeenAt  ?? null,
+      lastPacketTime:s.lastPacketTime ?? null,
+      registeredAt:  v.createdAt ?? null,
+      speedZeroSince: s.speedZeroSince  ?? null,
+      engineOffSince: s.engineOffSince  ?? null,
+      runningStreak:  age > 90_000 ? 0 : (s.runningStreak ?? 0),
+      movement:       s.lastMovement ?? null,
+    };
+  }).filter(Boolean);
 };
 
 module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions };
