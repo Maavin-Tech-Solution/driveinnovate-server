@@ -10,12 +10,18 @@ const getLocationModel = (deviceType) =>
 /**
  * Create a shareable link for a trip time window.
  * @param {number} vehicleId
- * @param {number} clientId - must own the vehicle
+ * @param {number} clientId - the logged-in user (recorded as createdBy)
  * @param {string} from  - ISO datetime string (trip startTime)
  * @param {string} to    - ISO datetime string (trip endTime)
+ * @param {number[]} [allowedClientIds] - the caller's full network scope; a
+ *        papa/dealer may share a vehicle owned by any sub-client, not just one
+ *        they own directly. Falls back to [clientId] for plain users.
  */
-const createTripShare = async (vehicleId, clientId, from, to) => {
-  const vehicle = await Vehicle.findOne({ where: { id: vehicleId, clientId } });
+const createTripShare = async (vehicleId, clientId, from, to, allowedClientIds = null) => {
+  const allowedIds = (Array.isArray(allowedClientIds) && allowedClientIds.length)
+    ? allowedClientIds
+    : [clientId];
+  const vehicle = await Vehicle.findOne({ where: { id: vehicleId, clientId: allowedIds } });
   if (!vehicle) {
     const err = new Error('Vehicle not found');
     err.status = 404;

@@ -11,7 +11,7 @@ exports.createShare = async (req, res) => {
     if (!vehicleId || !from || !to) {
       return res.status(400).json({ success: false, message: 'vehicleId, from and to are required' });
     }
-    const { token } = await shareService.createTripShare(vehicleId, req.user.id, from, to);
+    const { token } = await shareService.createTripShare(vehicleId, req.user.id, from, to, req.user.clientIds);
     return res.json({ success: true, data: { token } });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

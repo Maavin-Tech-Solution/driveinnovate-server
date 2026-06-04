@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { SpeedViolation, Vehicle, User, Trip, Stop } = require('../models');
 const { getMongoDb } = require('../config/mongodb');
+const { getCapabilities } = require('../config/deviceCapabilities');
 
 // When a caller passes a bare date string (YYYY-MM-DD) for endDate, a naive
 // new Date(endDate) lands at 00:00 UTC — which excludes the whole day of data.
@@ -29,48 +30,56 @@ class ReportService {
 
     try {
       const db = getMongoDb();
-      const LocationData = db.collection('locations');
-
-      // Build query - use direct fields (not nested in data)
       const { start, end } = normalizeRange(startDate, endDate);
-      const query = {
-        timestamp: { $gte: start, $lte: end },
-        speed: { $gt: speedLimit, $exists: true }
-      };
 
-      // If specific vehicles provided
-      if (vehicleIds && vehicleIds.length > 0) {
-        const vehicles = await Vehicle.findAll({
-          where: { id: { [Op.in]: vehicleIds } },
-          attributes: ['id', 'imei']
-        });
-        console.log('Analyzing violations for vehicles:', vehicles.map(v => ({ id: v.id, imei: v.imei })));
-        
-        const imeis = vehicles.map(v => v.imei).filter(Boolean);
-        if (imeis.length > 0) {
-          query.imei = { $in: imeis };
-        } else {
-          console.log('WARNING: No IMEIs found for provided vehicle IDs');
-        }
-      } else {
-        console.log('Analyzing violations for ALL vehicles (no filter)');
+      // Resolve target vehicles WITH their device type. GPS packets are not in a
+      // single "locations" collection — each device type writes to its own
+      // (gt06locations / fmb125locations / ais140locations), so we must read the
+      // correct collection per vehicle (same approach as trips/stops reports).
+      const where = {};
+      if (vehicleIds && vehicleIds.length > 0) where.id = { [Op.in]: vehicleIds };
+      const vehicles = await Vehicle.findAll({
+        where,
+        attributes: ['id', 'imei', 'deviceType']
+      });
+      console.log('Analyzing violations for vehicles:', vehicles.map(v => ({ id: v.id, imei: v.imei, deviceType: v.deviceType })));
+
+      const processedViolations = [];
+
+      for (const vehicle of vehicles) {
+        if (!vehicle.imei) continue;
+
+        const collectionName = this._getCollectionForDevice(vehicle.deviceType);
+        const LocationData = db.collection(collectionName);
+
+        // Packets may be stored with or without a leading zero on the IMEI —
+        // match both variants, exactly like the trip/stop/export readers do.
+        const imeiVariants = [vehicle.imei];
+        if (vehicle.imei.startsWith('0')) imeiVariants.push(vehicle.imei.slice(1));
+        else imeiVariants.push('0' + vehicle.imei);
+
+        const query = {
+          imei: { $in: imeiVariants },
+          timestamp: { $gte: start, $lte: end },
+          speed: { $gt: speedLimit, $exists: true }
+        };
+
+        const rawViolations = await LocationData.find(query)
+          .sort({ timestamp: 1 })
+          .toArray();
+
+        if (!rawViolations.length) continue;
+
+        // The grouping + save path keys off IMEI; normalize every packet to the
+        // vehicle's canonical IMEI so saveSpeedViolations resolves the vehicleId.
+        rawViolations.forEach(p => { p.imei = vehicle.imei; });
+
+        // Group consecutive over-speed packets into violation events. Each query
+        // returns a single vehicle's packets sorted by time, so grouping is correct.
+        processedViolations.push(
+          ...this._groupConsecutiveViolations(rawViolations, speedLimit, minDuration)
+        );
       }
-
-      console.log('MongoDB query:', JSON.stringify(query, null, 2));
-
-      // Fetch violations from MongoDB
-      const violations = await LocationData.find(query)
-        .sort({ imei: 1, timestamp: 1 })
-        .toArray();
-
-      console.log(`Found ${violations.length} raw violations from MongoDB`);
-
-      // Group consecutive violations and calculate duration
-      const processedViolations = this._groupConsecutiveViolations(
-        violations,
-        speedLimit,
-        minDuration
-      );
 
       console.log(`Processed into ${processedViolations.length} violation groups`);
 
@@ -641,14 +650,35 @@ class ReportService {
   }
 
   /**
-   * Save trips to database
+   * Save trips to database.
+   *
+   * The `trips` table has no unique constraint, so a plain insert (even with
+   * ignoreDuplicates) would append duplicate/overlapping rows every time the
+   * analyzer is re-run for the same period. To keep the save idempotent we
+   * replace previously-saved COMPLETED trips that fall within the span just
+   * analyzed, per vehicle, then insert the freshly computed set. (in_progress
+   * trips built live by the packet processor are left untouched.)
    */
   async saveTrips(trips) {
     try {
-      const saved = await Trip.bulkCreate(trips, {
-        ignoreDuplicates: true,
-        returning: true
-      });
+      if (!trips || !trips.length) return [];
+
+      const byVehicle = {};
+      for (const t of trips) (byVehicle[t.vehicleId] ||= []).push(t);
+
+      for (const [vehicleId, vTrips] of Object.entries(byVehicle)) {
+        const minStart = new Date(Math.min(...vTrips.map(t => new Date(t.startTime).getTime())));
+        const maxEnd   = new Date(Math.max(...vTrips.map(t => new Date(t.endTime).getTime())));
+        await Trip.destroy({
+          where: {
+            vehicleId,
+            status: 'completed',
+            startTime: { [Op.between]: [minStart, maxEnd] },
+          },
+        });
+      }
+
+      const saved = await Trip.bulkCreate(trips, { returning: true });
       return saved;
     } catch (error) {
       console.error('Error saving trips:', error);
@@ -681,7 +711,11 @@ class ReportService {
         };
       }
 
-      const { count, rows: trips } = await Trip.findAndCountAll({
+      // Fetch ALL matching trips first (no pagination) so we can collapse
+      // duplicate / overlapping rows before counting + paginating. Duplicates
+      // exist because trips are written by BOTH the live packet processor and
+      // the on-demand analyzer, sometimes with slightly different segmentation.
+      const rows = await Trip.findAll({
         where,
         include: [
           {
@@ -690,16 +724,22 @@ class ReportService {
             attributes: ['id', 'vehicleNumber', 'imei']
           }
         ],
-        order: [['startTime', 'DESC']],
-        limit,
-        offset
+        // Ordered so the dedup keeps the longest trip per overlapping cluster.
+        order: [['vehicleId', 'ASC'], ['startTime', 'ASC'], ['endTime', 'DESC']],
       });
 
-      const stats = await this._calculateTripStats(where);
+      const deduped = this._dedupeTrips(rows);
+
+      // Newest first for display
+      deduped.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+
+      const total = deduped.length;
+      const paged = deduped.slice(offset, offset + limit);
+      const stats = this._tripStatsFromList(deduped);
 
       return {
-        trips,
-        total: count,
+        trips: paged,
+        total,
         stats,
         filters
       };
@@ -707,6 +747,54 @@ class ReportService {
       console.error('Error getting trip report:', error);
       throw error;
     }
+  }
+
+  /**
+   * Collapse duplicate / overlapping trips per vehicle.
+   * `rows` MUST be ordered by [vehicleId ASC, startTime ASC, endTime DESC].
+   * A trip whose start falls before the end of the previously-kept trip for the
+   * same vehicle is treated as a duplicate/fragment and dropped.
+   * @private
+   */
+  _dedupeTrips(rows) {
+    const kept = [];
+    const lastEndByVehicle = {};
+    for (const t of rows) {
+      const vid = t.vehicleId;
+      const start = new Date(t.startTime).getTime();
+      const end = new Date(t.endTime).getTime();
+      const lastEnd = lastEndByVehicle[vid];
+      if (lastEnd === undefined || start >= lastEnd) {
+        kept.push(t);
+        lastEndByVehicle[vid] = end;
+      } else if (end > lastEnd) {
+        // Overlapping fragment that extends further — drop the row but extend
+        // coverage so subsequent fragments are also collapsed.
+        lastEndByVehicle[vid] = end;
+      }
+    }
+    return kept;
+  }
+
+  /**
+   * Compute trip summary stats from an in-memory (already de-duplicated) list,
+   * so the totals match exactly what the report displays.
+   * @private
+   */
+  _tripStatsFromList(trips) {
+    const totalDistance = trips.reduce((s, t) => s + parseFloat(t.distance || 0), 0);
+    const totalDuration = trips.reduce((s, t) => s + parseInt(t.duration || 0, 10), 0);
+    const avgSpeed = trips.length
+      ? trips.reduce((s, t) => s + parseFloat(t.avgSpeed || 0), 0) / trips.length
+      : 0;
+    const maxSpeed = trips.reduce((m, t) => Math.max(m, parseFloat(t.maxSpeed || 0)), 0);
+    return {
+      total: trips.length,
+      totalDistance: parseFloat(totalDistance.toFixed(2)),
+      totalDuration,
+      avgSpeed: parseFloat(avgSpeed.toFixed(2)),
+      maxSpeed: parseFloat(maxSpeed.toFixed(2)),
+    };
   }
 
   /**
@@ -884,14 +972,32 @@ class ReportService {
   }
 
   /**
-   * Save stops to database
+   * Save stops to database.
+   *
+   * Like trips, the `stops` table has no unique constraint, so we make the save
+   * idempotent: replace previously-saved stops within the analyzed span (per
+   * vehicle) before inserting the freshly computed set, preventing duplicates
+   * and overlaps from repeated analysis runs.
    */
   async saveStops(stops) {
     try {
-      const saved = await Stop.bulkCreate(stops, {
-        ignoreDuplicates: true,
-        returning: true
-      });
+      if (!stops || !stops.length) return [];
+
+      const byVehicle = {};
+      for (const s of stops) (byVehicle[s.vehicleId] ||= []).push(s);
+
+      for (const [vehicleId, vStops] of Object.entries(byVehicle)) {
+        const minStart = new Date(Math.min(...vStops.map(s => new Date(s.startTime).getTime())));
+        const maxEnd   = new Date(Math.max(...vStops.map(s => new Date(s.endTime).getTime())));
+        await Stop.destroy({
+          where: {
+            vehicleId,
+            startTime: { [Op.between]: [minStart, maxEnd] },
+          },
+        });
+      }
+
+      const saved = await Stop.bulkCreate(stops, { returning: true });
       return saved;
     } catch (error) {
       console.error('Error saving stops:', error);
@@ -1013,11 +1119,10 @@ class ReportService {
    * @private
    */
   _getCollectionForDevice(deviceType) {
-    if (!deviceType) return 'gt06locations';
-    const dt = deviceType.toUpperCase();
-    if (dt === 'AIS140')                         return 'ais140locations';
-    if (dt === 'FMB125' || dt.startsWith('FMB')) return 'fmb125locations';
-    return 'gt06locations'; // GT06 and others default
+    // Delegate to the single source of truth used by the packet writers/catch-up
+    // so report reads always hit the same collection the data was written to
+    // (e.g. FMB920 → fmb920locations, not fmb125locations).
+    return getCapabilities(deviceType).mongoCollection || 'gt06locations';
   }
 
   /**
