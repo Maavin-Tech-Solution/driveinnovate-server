@@ -51,6 +51,28 @@
 
 const { getCapabilities } = require('../config/deviceCapabilities');
 
+/**
+ * Normalise a device's "external/main power voltage" reading to VOLTS.
+ *
+ * Devices report this in millivolts (e.g. 12000 mV for a 12 V rail, 28000 mV
+ * for 24 V). The `last_external_voltage` column is DECIMAL(5,2) (max 999.99 V),
+ * so writing raw mV overflowed it and failed the whole packet
+ * ("Out of range value for column 'last_external_voltage'").
+ *
+ * Real vehicle rails are well under 100 V, so any value > 100 is treated as
+ * millivolts and divided by 1000. The result is clamped to the column range so
+ * a bad reading can never crash packet processing again.
+ */
+function normalizeVolts(raw) {
+  if (raw == null) return null;
+  let v = parseFloat(raw);
+  if (!Number.isFinite(v)) return null;
+  if (v > 100) v = v / 1000;          // mV → V
+  if (v < 0) v = 0;
+  if (v > 999.99) v = 999.99;         // never exceed DECIMAL(5,2)
+  return Math.round(v * 100) / 100;   // 2 decimal places
+}
+
 // ─── Per-device normalizers ───────────────────────────────────────────────────
 
 /**
@@ -161,7 +183,7 @@ function normalizeFMB125(doc) {
     fuel:            doc.fuelLevel != null ? parseFloat(doc.fuelLevel) : null,
     odometer:        doc.totalOdometer != null ? parseFloat(doc.totalOdometer) : null,
     battery:         doc.battery != null ? parseFloat(doc.battery) : null,
-    externalVoltage: doc.externalVoltage != null ? parseFloat(doc.externalVoltage) : null,
+    externalVoltage: normalizeVolts(doc.externalVoltage),
     gsmSignal:       doc.gsm != null ? parseInt(doc.gsm, 10) : null,
 
     packetType:  doc.packetType || null,
@@ -220,7 +242,7 @@ function normalizeAIS140(doc) {
     fuel:            null,
     odometer:        doc.odometer != null ? parseFloat(doc.odometer) : null,
     battery:         doc.batteryVoltage   != null ? parseFloat(doc.batteryVoltage)   : null,
-    externalVoltage: doc.mainPowerVoltage != null ? parseFloat(doc.mainPowerVoltage) : null,
+    externalVoltage: normalizeVolts(doc.mainPowerVoltage),
     gsmSignal:       doc.gsmSignal != null ? parseInt(doc.gsmSignal, 10) : null,
 
     // AIS-140 specific
@@ -280,8 +302,8 @@ function normalizeGeneric(doc, deviceType) {
                        ? parseFloat(doc[caps.odometerField]) : null,
     battery:         caps.batteryField && doc[caps.batteryField] != null
                        ? parseFloat(doc[caps.batteryField]) : null,
-    externalVoltage: caps.externalVoltageField && doc[caps.externalVoltageField] != null
-                       ? parseFloat(doc[caps.externalVoltageField]) : null,
+    externalVoltage: caps.externalVoltageField
+                       ? normalizeVolts(doc[caps.externalVoltageField]) : null,
     gsmSignal:       caps.signalField && doc[caps.signalField] != null
                        ? parseInt(doc[caps.signalField], 10) : null,
 
