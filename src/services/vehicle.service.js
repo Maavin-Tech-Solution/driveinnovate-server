@@ -1238,18 +1238,27 @@ const getLivePositions = async (clientId, since) => {
     where: stateWhere,
     attributes: [
       'vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn',
-      'lastPacketTime', 'updatedAt', 'lastSeenAt', 'firstSeenAt',
+      'lastPacketTime', 'lastGpsPacketTime', 'updatedAt', 'lastSeenAt', 'firstSeenAt',
       'speedZeroSince', 'engineOffSince', 'runningStreak', 'lastMovement',
     ],
   });
 
   const vehicleMap = new Map(vehicles.map(v => [v.id, v]));
+  // A vehicle that's only sending heartbeats (no GPS) keeps its last GPS speed /
+  // runningStreak / movement forever — making a parked vehicle look "Running".
+  // Treat the GPS-derived fields (speed, streak, movement) as stale and drop
+  // them when the last GPS fix is older than this, regardless of heartbeats.
+  const GPS_STALE_MS = 180_000; // 3 min without a GPS packet → speed/motion unknown
 
   return states.map(s => {
     const v = vehicleMap.get(s.vehicleId);
     if (!v) return null;
     const ts  = s.lastSeenAt || s.updatedAt;
     const age = ts ? (Date.now() - new Date(ts).getTime()) : Infinity;
+    // Age of the last GPS-bearing packet (lastGpsPacketTime only advances on GPS
+    // packets). If there's no recent GPS fix, speed/movement are stale.
+    const gpsTs   = s.lastGpsPacketTime;
+    const gpsStale = !gpsTs || (Date.now() - new Date(gpsTs).getTime()) > GPS_STALE_MS;
     return {
       id:            v.id,
       vehicleNumber: v.vehicleNumber,
@@ -1257,16 +1266,18 @@ const getLivePositions = async (clientId, since) => {
       vehicleIcon:   v.vehicleIcon,
       lat:           s.lastLat  ? parseFloat(s.lastLat)  : null,
       lng:           s.lastLng  ? parseFloat(s.lastLng)  : null,
-      speed:         s.lastSpeed ?? 0,
-      engineOn:      s.engineOn ?? false,
+      // Speed/motion come ONLY from the latest GPS fix — null when it's stale so
+      // the UI doesn't show a leftover speed from when the vehicle last moved.
+      speed:         gpsStale ? null : (s.lastSpeed ?? 0),
+      engineOn:      s.engineOn ?? false,   // ignition IS present in heartbeats — keep it
       firstSeenAt:   s.firstSeenAt ?? null,
       lastSeenAt:    s.lastSeenAt  ?? null,
       lastPacketTime:s.lastPacketTime ?? null,
       registeredAt:  v.createdAt ?? null,
       speedZeroSince: s.speedZeroSince  ?? null,
       engineOffSince: s.engineOffSince  ?? null,
-      runningStreak:  age > 90_000 ? 0 : (s.runningStreak ?? 0),
-      movement:       s.lastMovement ?? null,
+      runningStreak:  (gpsStale || age > 90_000) ? 0 : (s.runningStreak ?? 0),
+      movement:       gpsStale ? null : (s.lastMovement ?? null),
     };
   }).filter(Boolean);
 };
