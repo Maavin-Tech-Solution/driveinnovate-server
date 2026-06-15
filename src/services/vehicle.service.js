@@ -1,5 +1,34 @@
-const { Vehicle, RtoDetail, User, VehicleDeviceState } = require('../models');
+const { Vehicle, RtoDetail, User, VehicleDeviceState, VehicleEditHistory } = require('../models');
 const { Op } = require('sequelize');
+
+// Fields whose edits are audited, with human-friendly labels.
+const TRACKED_FIELDS = {
+  vehicleNumber: 'Registration No.',
+  vehicleName: 'Vehicle Name',
+  branch: 'Branch',
+  chasisNumber: 'Chassis Number',
+  engineNumber: 'Engine Number',
+  imei: 'IMEI',
+  sim1: 'SIM 1 / Mobile No',
+  sim2: 'SIM 2',
+  deviceName: 'Device Name',
+  deviceType: 'Device Type',
+  serverIp: 'Server IP',
+  serverPort: 'Server Port',
+  vehicleIcon: 'Vehicle Icon',
+  status: 'Status',
+  idleThreshold: 'Idle Threshold',
+  fuelFillThreshold: 'Fuel Fill Threshold',
+  fuelSupported: 'Fuel Supported',
+  fuelTankCapacity: 'Fuel Tank Capacity',
+};
+
+// Normalise a value for change comparison + storage (null/'' both → '').
+const normaliseValue = (v) => {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  return String(v);
+};
 const { Location, FMB125Location, AIS140Location, isMongoDBConnected } = require('../config/mongodb');
 const { invalidateVehicleCache } = require('./packetProcessor.service');
 
@@ -874,7 +903,7 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
   });
 };
 
-const updateVehicle = async (id, clientId, data, callerClientIds) => {
+const updateVehicle = async (id, clientId, data, callerClientIds, actor = {}) => {
   // Allow papa/dealer to edit any vehicle that belongs to their network.
   // Fall back to exact-match when callerClientIds is not provided (old call sites).
   const allIds = callerClientIds?.length ? callerClientIds : [clientId];
@@ -884,13 +913,79 @@ const updateVehicle = async (id, clientId, data, callerClientIds) => {
     err.status = 404;
     throw err;
   }
+
+  // Snapshot tracked fields BEFORE the update so we can diff for the audit log.
+  const before = {};
+  for (const f of Object.keys(TRACKED_FIELDS)) before[f] = vehicle.get(f);
+  const prevImei = vehicle.imei;
+
   // Invalidate cache before update in case IMEI changes
   if (vehicle.imei) invalidateVehicleCache(vehicle.imei);
   await vehicle.update(data);
-  if (data.imei && data.imei !== vehicle.imei) invalidateVehicleCache(data.imei);
+  if (data.imei && data.imei !== prevImei) invalidateVehicleCache(data.imei);
+
+  // Record one history row per tracked field that actually changed.
+  try {
+    const changes = [];
+    for (const [field, label] of Object.entries(TRACKED_FIELDS)) {
+      // Only consider fields the caller actually sent.
+      if (!Object.prototype.hasOwnProperty.call(data, field)) continue;
+      const oldNorm = normaliseValue(before[field]);
+      const newNorm = normaliseValue(vehicle.get(field));
+      if (oldNorm === newNorm) continue;
+      changes.push({
+        vehicleId: vehicle.id,
+        field,
+        fieldLabel: label,
+        oldValue: oldNorm === '' ? null : oldNorm,
+        newValue: newNorm === '' ? null : newNorm,
+        userId: actor.id ?? null,
+        userName: actor.name || actor.email || null,
+      });
+    }
+    if (changes.length) await VehicleEditHistory.bulkCreate(changes);
+  } catch (e) {
+    // Never fail the edit because the audit write failed.
+    console.error('[vehicle] edit-history write failed:', e.message);
+  }
 
   // Attach GPS data to updated vehicle
   return await attachGpsData(vehicle);
+};
+
+/**
+ * Paginated edit history for a vehicle (newest first), scoped to the caller's
+ * network so users only see audit rows for vehicles they own.
+ */
+const getEditHistory = async (id, callerClientIds, { limit = 100, offset = 0 } = {}) => {
+  const vehicle = await Vehicle.findOne({
+    where: { id, clientId: callerClientIds?.length ? callerClientIds : undefined },
+    attributes: ['id'],
+  });
+  if (!vehicle) {
+    const err = new Error('Vehicle not found');
+    err.status = 404;
+    throw err;
+  }
+  const { count, rows } = await VehicleEditHistory.findAndCountAll({
+    where: { vehicleId: id },
+    order: [['created_at', 'DESC']],
+    limit,
+    offset,
+  });
+  return {
+    total: count,
+    rows: rows.map((r) => ({
+      id: r.id,
+      field: r.field,
+      fieldLabel: r.fieldLabel,
+      oldValue: r.oldValue,
+      newValue: r.newValue,
+      userId: r.userId,
+      userName: r.userName,
+      changedAt: r.get('created_at'),
+    })),
+  };
 };
 
 const deleteVehicle = async (id, callerClientIds) => {
@@ -1176,4 +1271,4 @@ const getLivePositions = async (clientId, since) => {
   }).filter(Boolean);
 };
 
-module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions };
+module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };

@@ -33,6 +33,9 @@ router.get('/:id/sync', validateConsumer, vehicleController.syncVehicleData);
 // GET /api/vehicles/:id/location-player - get location history for playback
 router.get('/:id/location-player', validateConsumer, vehicleController.getLocationPlayerData);
 
+// GET /api/vehicles/:id/edit-history - audit trail of edits to this vehicle
+router.get('/:id/edit-history', validateConsumer, vehicleController.getEditHistory);
+
 // Sensor CRUD
 router.get('/:id/sensors', validateConsumer, sensorController.getSensors);
 router.post('/:id/sensors', validateConsumer, sensorController.createSensor);

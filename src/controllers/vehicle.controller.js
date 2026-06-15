@@ -93,8 +93,29 @@ const updateVehicle = async (req, res) => {
         return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
       }
     }
-    const vehicle = await vehicleService.updateVehicle(req.params.id, req.user.id, req.body, req.user.clientIds);
+    const vehicle = await vehicleService.updateVehicle(
+      req.params.id,
+      req.user.id,
+      req.body,
+      req.user.clientIds,
+      { id: req.user.id, name: req.user.name, email: req.user.email },
+    );
     return res.json({ success: true, message: 'Vehicle updated successfully', data: vehicle });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * GET /api/vehicles/:id/edit-history
+ * Audit trail of edits to a vehicle (newest first).
+ */
+const getEditHistory = async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const offset = parseInt(req.query.offset) || 0;
+    const data = await vehicleService.getEditHistory(req.params.id, req.user.clientIds, { limit, offset });
+    return res.json({ success: true, data });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
   }
@@ -193,4 +214,4 @@ const getLivePositions = async (req, res) => {
   }
 };
 
-module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions };
+module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };
