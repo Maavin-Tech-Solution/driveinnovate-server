@@ -21,6 +21,9 @@ router.post('/', validateConsumer, vehicleController.addVehicle);
 // PUT /api/vehicles/:id - update vehicle
 router.put('/:id', validateConsumer, vehicleController.updateVehicle);
 
+// POST /api/vehicles/:id/reassign - transfer vehicle to another client
+router.post('/:id/reassign', validateConsumer, vehicleController.reassignVehicle);
+
 // DELETE /api/vehicles/:id - delete vehicle
 router.delete('/:id', validateConsumer, vehicleController.deleteVehicle);
 

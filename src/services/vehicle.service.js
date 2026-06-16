@@ -1,4 +1,8 @@
-const { Vehicle, RtoDetail, User, VehicleDeviceState, VehicleEditHistory } = require('../models');
+const {
+  Vehicle, RtoDetail, User, VehicleDeviceState, VehicleEditHistory,
+  VehicleGroup, VehicleGroupMember, Geofence, GeofenceAssignment,
+  Alert, LiveShare, TripShare, sequelize,
+} = require('../models');
 const { Op } = require('sequelize');
 
 // Fields whose edits are audited, with human-friendly labels.
@@ -1216,6 +1220,100 @@ const getLocationPlayerData = async (id, callerClientIds, from, to, limit = 1000
  * Reads only VehicleDeviceState (MySQL). No MongoDB. Fast.
  * GT06 ignition: engineOn already computed with speed-based logic by processPacket.
  */
+/**
+ * Reassign a vehicle to another client (within the caller's network).
+ *
+ * Vehicle-owned data (live state, trips/stops/engine/fuel history, challans,
+ * RTO, sensors, custom fields, edit history) travels with the vehicle. Links
+ * that belong to the PREVIOUS client are removed so they don't leak to / from
+ * the new owner:
+ *   • group memberships in the old client's groups
+ *   • geofence assignments to the old client's geofences
+ *   • vehicle-scoped alerts owned by the old client
+ *   • any active live / trip shares for the vehicle
+ *
+ * All changes run in a single transaction.
+ *
+ * @param {number} vehicleId
+ * @param {number} targetClientId  destination client (must be in callerClientIds)
+ * @param {number[]} callerClientIds  caller's full network scope
+ * @param {{id:number,name?:string,email?:string}} actor  who performed it (for audit)
+ */
+const reassignVehicle = async (vehicleId, targetClientId, callerClientIds, actor = {}) => {
+  const allIds = callerClientIds?.length ? callerClientIds : [];
+  const target = Number(targetClientId);
+  if (!target || Number.isNaN(target)) {
+    throw Object.assign(new Error('targetClientId is required'), { status: 400 });
+  }
+
+  // Vehicle must be in the caller's network.
+  const vehicle = await Vehicle.findOne({ where: { id: vehicleId, clientId: allIds } });
+  if (!vehicle) throw Object.assign(new Error('Vehicle not found'), { status: 404 });
+
+  // Target client must also be in the caller's network and must exist.
+  if (!allIds.includes(target)) {
+    throw Object.assign(new Error('You do not have access to the target client'), { status: 403 });
+  }
+  const targetUser = await User.findByPk(target);
+  if (!targetUser) throw Object.assign(new Error('Target client not found'), { status: 404 });
+
+  const oldClientId = vehicle.clientId;
+  if (oldClientId === target) {
+    throw Object.assign(new Error('Vehicle is already assigned to this client'), { status: 400 });
+  }
+  const newParentId = targetUser.parentId || target;
+
+  if (vehicle.imei) invalidateVehicleCache(vehicle.imei);
+
+  await sequelize.transaction(async (t) => {
+    // 1. Remove memberships in the OLD client's groups.
+    const oldGroups = await VehicleGroup.findAll({
+      where: { clientId: oldClientId }, attributes: ['id'], transaction: t,
+    });
+    if (oldGroups.length) {
+      await VehicleGroupMember.destroy({
+        where: { vehicleId, groupId: oldGroups.map(g => g.id) }, transaction: t,
+      });
+    }
+
+    // 2. Remove direct geofence assignments to the OLD client's geofences.
+    const oldGeofences = await Geofence.findAll({
+      where: { clientId: oldClientId }, attributes: ['id'], transaction: t,
+    });
+    if (oldGeofences.length) {
+      await GeofenceAssignment.destroy({
+        where: { vehicleId, geofenceId: oldGeofences.map(g => g.id) }, transaction: t,
+      });
+    }
+
+    // 3. Remove vehicle-scoped alerts owned by the OLD client. (GROUP / ALL
+    //    scoped alerts auto-exclude the vehicle once it leaves the client.)
+    await Alert.destroy({
+      where: { clientId: oldClientId, vehicleId, scope: 'VEHICLE' }, transaction: t,
+    });
+
+    // 4. Revoke any active shares exposing this vehicle.
+    await LiveShare.destroy({ where: { vehicleId }, transaction: t });
+    await TripShare.destroy({ where: { vehicleId }, transaction: t });
+
+    // 5. Reassign ownership.
+    await vehicle.update({ clientId: target, parentId: newParentId }, { transaction: t });
+
+    // 6. Audit trail.
+    await VehicleEditHistory.create({
+      vehicleId,
+      field: 'clientId',
+      fieldLabel: 'Assigned Client',
+      oldValue: String(oldClientId),
+      newValue: String(target),
+      userId: actor.id ?? null,
+      userName: actor.name || actor.email || null,
+    }, { transaction: t });
+  });
+
+  return await attachGpsData(vehicle);
+};
+
 const getLivePositions = async (clientId, since) => {
   // Lightweight MySQL-only poll — no MongoDB queries per vehicle.
   // Returns only the fields the map/list poll needs: position, speed,
@@ -1282,4 +1380,4 @@ const getLivePositions = async (clientId, since) => {
   }).filter(Boolean);
 };
 
-module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };
+module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, reassignVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };

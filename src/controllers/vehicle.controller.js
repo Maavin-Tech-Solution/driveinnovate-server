@@ -107,6 +107,25 @@ const updateVehicle = async (req, res) => {
 };
 
 /**
+ * POST /api/vehicles/:id/reassign
+ * Transfer a vehicle to another client in the caller's network.
+ * Body: { targetClientId }
+ */
+const reassignVehicle = async (req, res) => {
+  try {
+    const vehicle = await vehicleService.reassignVehicle(
+      req.params.id,
+      req.body.targetClientId,
+      req.user.clientIds,
+      { id: req.user.id, name: req.user.name, email: req.user.email },
+    );
+    return res.json({ success: true, message: 'Vehicle reassigned successfully', data: vehicle });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+/**
  * GET /api/vehicles/:id/edit-history
  * Audit trail of edits to a vehicle (newest first).
  */
@@ -214,4 +233,4 @@ const getLivePositions = async (req, res) => {
   }
 };
 
-module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };
+module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, reassignVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };
