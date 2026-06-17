@@ -1337,7 +1337,7 @@ const getLivePositions = async (clientId, since) => {
   // index.)
   const vehicles = await Vehicle.findAll({
     where: { clientId, status: { [Op.ne]: 'deleted' } },
-    attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon', 'createdAt'],
+    attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
   });
   const vehicleIds = vehicles.map(v => v.id);
   if (!vehicleIds.length) return [];
