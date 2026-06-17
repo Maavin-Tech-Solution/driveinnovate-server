@@ -1329,14 +1329,13 @@ const getLivePositions = async (clientId, since) => {
   // Returns only the fields the map/list poll needs: position, speed,
   // ignition state and streak.  Full device status (fuel, battery, sensors)
   // is loaded on demand via syncVehicleData when the user opens a vehicle.
-  const vehicles = await Vehicle.findAll({
-    where: { clientId, status: { [Op.ne]: 'deleted' } },
-    attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
-  });
-  const vehicleIds = vehicles.map(v => v.id);
-  if (!vehicleIds.length) return [];
-
-  const stateWhere = { vehicleId: vehicleIds };
+  //
+  // Scales to 5k+ vehicles: when the client sends `since` (incremental poll) we
+  // drive the query off VehicleDeviceState.lastSeenAt and INNER JOIN the client's
+  // vehicles, so only the rows that actually changed are read — no full-fleet
+  // scan. Without `since` (periodic full snapshot) it returns the whole fleet.
+  // Needs indexes on VehicleDeviceState.lastSeenAt and Vehicle.clientId.
+  const stateWhere = {};
   if (since) {
     const sinceDate = new Date(since);
     if (!isNaN(sinceDate)) stateWhere.lastSeenAt = { [Op.gt]: sinceDate };
@@ -1349,9 +1348,16 @@ const getLivePositions = async (clientId, since) => {
       'lastPacketTime', 'lastGpsPacketTime', 'updatedAt', 'lastSeenAt', 'firstSeenAt',
       'speedZeroSince', 'engineOffSince', 'runningStreak', 'lastMovement',
     ],
+    include: [{
+      model: Vehicle,
+      as: 'vehicle',
+      required: true,  // INNER JOIN — restricts to this client's (non-deleted) vehicles
+      where: { clientId, status: { [Op.ne]: 'deleted' } },
+      attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon', 'createdAt'],
+    }],
   });
 
-  const vehicleMap = new Map(vehicles.map(v => [v.id, v]));
+  const vehicleMap = new Map(states.map(s => [s.vehicleId, s.vehicle]));
   // A vehicle that's only sending heartbeats (no GPS) keeps its last GPS speed /
   // runningStreak / movement forever — making a parked vehicle look "Running".
   // Treat the GPS-derived fields (speed, streak, movement) as stale and drop
