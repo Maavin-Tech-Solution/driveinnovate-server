@@ -201,7 +201,7 @@ const getLiveShareData = async (token) => {
     if (share.vehicleId) {
       const state = await VehicleDeviceState.findOne({
         where: { vehicleId: share.vehicleId },
-        attributes: ['vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn', 'lastPacketTime'],
+        attributes: ['vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn', 'lastPacketTime', 'lastSeenAt'],
       });
       if (state) {
         positions = [{
@@ -214,6 +214,9 @@ const getLiveShareData = async (token) => {
           speed:          state.lastSpeed ?? 0,
           engineOn:       state.engineOn ?? false,
           lastPacketTime: state.lastPacketTime ?? null,
+          // Real server receive time — reliable for "last seen" even when the
+          // device's own clock (lastPacketTime) is wrong.
+          lastSeenAt:     state.lastSeenAt ?? null,
         }];
       }
     }
@@ -234,7 +237,7 @@ const getLiveShareData = async (token) => {
     if (vehicleIds.length) {
       const states = await VehicleDeviceState.findAll({
         where: { vehicleId: vehicleIds },
-        attributes: ['vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn', 'lastPacketTime'],
+        attributes: ['vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn', 'lastPacketTime', 'lastSeenAt'],
       });
       const stateMap = new Map(states.map(s => [s.vehicleId, s]));
 
@@ -252,6 +255,8 @@ const getLiveShareData = async (token) => {
           speed:          s?.lastSpeed ?? 0,
           engineOn:       s?.engineOn ?? false,
           lastPacketTime: s?.lastPacketTime ?? null,
+          // Real server receive time — reliable for "last seen".
+          lastSeenAt:     s?.lastSeenAt ?? null,
         };
       }).filter(Boolean);
     }
