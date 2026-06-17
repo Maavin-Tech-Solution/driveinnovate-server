@@ -701,7 +701,7 @@ const attachComprehensiveStatus = async (vehicle) => {
     fetchComprehensiveDeviceStatus(vehicleJson.imei, vehicleJson.deviceType),
     VehicleDeviceState.findOne({
       where: { vehicleId: vehicleJson.id },
-      attributes: ['engineOn', 'lastPacketTime', 'lastLat', 'lastLng', 'lastSpeed', 'lastAltitude', 'lastSatellites', 'lastCourse',
+      attributes: ['engineOn', 'lastPacketTime', 'lastGpsPacketTime', 'lastLat', 'lastLng', 'lastSpeed', 'lastAltitude', 'lastSatellites', 'lastCourse',
                    'engineOffSince', 'speedZeroSince', 'runningStreak', 'firstSeenAt', 'lastSeenAt', 'lastMovement'],
     }),
   ]);
@@ -804,11 +804,21 @@ const attachComprehensiveStatus = async (vehicle) => {
     const streakAge = streakTs
       ? (Date.now() - new Date(streakTs).getTime())
       : Infinity;                    // no anchor → treat as infinitely old
-    deviceStatus.status.runningStreak = streakAge > 90_000 ? 0 : (state.runningStreak ?? 0);
-    // AIS140 physical movement sensor — surfaces to state evaluator
-    if (state.lastMovement != null) {
-      deviceStatus.status.movement = state.lastMovement;
-    }
+
+    // Speed / motion are only valid as of the LAST DATA (GPS) packet. A vehicle
+    // that's merely heartbeating (no GPS) keeps lastSeenAt fresh but its speed,
+    // streak and movement are stale — so gate them on lastGpsPacketTime, the
+    // time of the last position-bearing packet. Stale ⇒ present as "not moving"
+    // so a parked vehicle is never shown Running with leftover speed.
+    const GPS_STALE_MS = 180_000; // 3 min without a GPS packet
+    const gpsTs = state.lastGpsPacketTime;
+    const gpsStale = !gpsTs || (Date.now() - new Date(gpsTs).getTime()) > GPS_STALE_MS;
+
+    deviceStatus.status.runningStreak = (gpsStale || streakAge > 90_000) ? 0 : (state.runningStreak ?? 0);
+    // AIS140 physical movement sensor — only when the GPS data is current.
+    deviceStatus.status.movement = gpsStale ? null : (state.lastMovement ?? null);
+    // Don't show a leftover speed from when the vehicle last moved.
+    if (gpsStale && deviceStatus.gpsData) deviceStatus.gpsData.speed = null;
   }
 
   // Registration date — Sequelize with underscored:true outputs registered_at
