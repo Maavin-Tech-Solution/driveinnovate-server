@@ -1359,32 +1359,30 @@ const getLivePositions = async (clientId /*, since */) => {
   });
   const stateMap = new Map(states.map(s => [s.vehicleId, s]));
 
-  // Newest GPS-bearing packet per IMEI, pulled directly from MongoDB (one indexed
-  // aggregation per collection — uses the {imei:1, timestamp:-1} index).
+  // Newest GPS-bearing packet per IMEI, pulled directly from MongoDB using the
+  // SAME proven pattern as syncVehicleData/reload: a per-IMEI index seek on
+  // {imei:1, timestamp:-1} with limit 1 (fast — NOT a full-collection $group).
   const latest = new Map(); // normalised imei -> mongo doc
   try {
     const db = getMongoDb();
-    const byColl = new Map();
-    for (const v of vehicles) {
+    await Promise.all(vehicles.map(async (v) => {
       const coll = LIVE_COLL[(v.deviceType || '').toUpperCase()];
-      if (!coll || !v.imei) continue;
-      if (!byColl.has(coll)) byColl.set(coll, new Set());
-      byColl.get(coll).add(v.imei);
-      byColl.get(coll).add(v.imei.startsWith('0') ? v.imei.slice(1) : '0' + v.imei);
-    }
-    await Promise.all([...byColl.entries()].map(async ([coll, imeiSet]) => {
-      const docs = await db.collection(coll).aggregate([
-        { $match: { imei: { $in: [...imeiSet] }, latitude: { $ne: null } } },
-        { $sort: { imei: 1, timestamp: -1 } },
-        { $group: { _id: '$imei', doc: { $first: '$$ROOT' } } },
-      ], { allowDiskUse: true }).toArray();
-      for (const r of docs) latest.set(_imeiKey(r._id), r.doc);
+      if (!coll || !v.imei) return;
+      const variants = [v.imei, v.imei.startsWith('0') ? v.imei.slice(1) : '0' + v.imei];
+      try {
+        const doc = await db.collection(coll)
+          .find({ imei: { $in: variants }, latitude: { $ne: null } })
+          .sort({ timestamp: -1 })
+          .limit(1)
+          .next();
+        if (doc) latest.set(_imeiKey(v.imei), doc);
+      } catch { /* skip this vehicle, fall back to state row below */ }
     }));
   } catch (e) {
     console.warn('[livePositions] MongoDB overlay failed, falling back to MySQL state:', e.message);
   }
 
-  return vehicles.map(v => {
+  const out = vehicles.map(v => {
     const s = stateMap.get(v.id) || {};
     const m = latest.get(_imeiKey(v.imei)); // newest GPS fix (fresh) or undefined
 
@@ -1413,6 +1411,17 @@ const getLivePositions = async (clientId /*, since */) => {
       movement:       s.lastMovement ?? null,
     };
   });
+
+  // TEMP DIAGNOSTIC — prints what we actually return for a moving vehicle so the
+  // server log alone tells us if live-positions is FRESH (lat/lng changing) without
+  // needing the browser Network tab. Remove once confirmed.
+  const sample = out.find(r => (r.speed || 0) > 5) || out[0];
+  if (sample) {
+    const src = latest.has(_imeiKey(vehicles.find(v => v.id === sample.id)?.imei)) ? 'MONGO' : 'state';
+    console.log(`[livePos] cid=${clientId} id=${sample.id} lat=${sample.lat} lng=${sample.lng} spd=${sample.speed} src=${src} seen=${sample.lastSeenAt}`);
+  }
+
+  return out;
 };
 
 module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, reassignVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };
