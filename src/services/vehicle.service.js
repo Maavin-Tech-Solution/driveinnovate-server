@@ -33,7 +33,7 @@ const normaliseValue = (v) => {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   return String(v);
 };
-const { Location, FMB125Location, AIS140Location, isMongoDBConnected } = require('../config/mongodb');
+const { Location, FMB125Location, AIS140Location, isMongoDBConnected, getMongoDb } = require('../config/mongodb');
 const { invalidateVehicleCache } = require('./packetProcessor.service');
 
 // Device type groups → MongoDB collections
@@ -1324,76 +1324,95 @@ const reassignVehicle = async (vehicleId, targetClientId, callerClientIds, actor
   return await attachGpsData(vehicle);
 };
 
-const getLivePositions = async (clientId, since) => {
-  // Lightweight MySQL-only poll — no MongoDB queries per vehicle.
-  // Returns only the fields the map/list poll needs: position, speed,
-  // ignition state and streak.  Full device status (fuel, battery, sensors)
-  // is loaded on demand via syncVehicleData when the user opens a vehicle.
+const LIVE_COLL = {
+  GT06: 'gt06locations', GT06N: 'gt06locations',
+  FMB125: 'fmb125locations', FMB920: 'fmb920locations',
+  AIS140: 'ais140locations',
+};
+const _imeiKey = (imei) => (imei || '').replace(/^0+/, ''); // normalise leading zeros
+
+const getLivePositions = async (clientId /*, since */) => {
+  // Real-time map poll. The change-stream → VehicleDeviceState pipeline can fall
+  // minutes behind under heavy packet load (its lastSeenAt looks fresh because
+  // it's stamped at PROCESS time, but lastLat is whatever old packet is being
+  // processed). So we OVERLAY the newest GPS fix straight from MongoDB — the same
+  // current source a manual reload reads — and the marker tracks live regardless
+  // of how far behind processPacket (trips/sessions) runs. VehicleDeviceState
+  // still supplies the derived fields (runningStreak / speedZeroSince).
   //
-  // Incremental for scale: when the client sends `since`, the states query is
-  // filtered by lastSeenAt so only changed rows are read. (A previous INNER-JOIN
-  // variant returned 500s on the deployed DB, so we keep the simple two-query
-  // form that's known to work; the vehicle list query is cheap with a clientId
-  // index.)
+  // `since` is intentionally ignored: we always return the full fleet so a moving
+  // vehicle can never be starved out by a watermark cursor.
   const vehicles = await Vehicle.findAll({
     where: { clientId, status: { [Op.ne]: 'deleted' } },
-    attributes: ['id', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
+    attributes: ['id', 'imei', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
   });
+  if (!vehicles.length) return [];
   const vehicleIds = vehicles.map(v => v.id);
-  if (!vehicleIds.length) return [];
-
-  const stateWhere = { vehicleId: vehicleIds };
-  if (since) {
-    const sinceDate = new Date(since);
-    if (!isNaN(sinceDate)) stateWhere.lastSeenAt = { [Op.gt]: sinceDate };
-  }
 
   const states = await VehicleDeviceState.findAll({
-    where: stateWhere,
+    where: { vehicleId: vehicleIds },
     attributes: [
       'vehicleId', 'lastLat', 'lastLng', 'lastSpeed', 'engineOn',
-      'lastPacketTime', 'lastGpsPacketTime', 'updatedAt', 'lastSeenAt', 'firstSeenAt',
+      'lastPacketTime', 'lastSeenAt', 'firstSeenAt',
       'speedZeroSince', 'engineOffSince', 'runningStreak', 'lastMovement',
     ],
   });
+  const stateMap = new Map(states.map(s => [s.vehicleId, s]));
 
-  const vehicleMap = new Map(vehicles.map(v => [v.id, v]));
-  // A vehicle that's only sending heartbeats (no GPS) keeps its last GPS speed /
-  // runningStreak / movement forever — making a parked vehicle look "Running".
-  // Treat the GPS-derived fields (speed, streak, movement) as stale and drop
-  // them when the last GPS fix is older than this, regardless of heartbeats.
-  const GPS_STALE_MS = 180_000; // 3 min without a GPS packet → speed/motion unknown
+  // Newest GPS-bearing packet per IMEI, pulled directly from MongoDB (one indexed
+  // aggregation per collection — uses the {imei:1, timestamp:-1} index).
+  const latest = new Map(); // normalised imei -> mongo doc
+  try {
+    const db = getMongoDb();
+    const byColl = new Map();
+    for (const v of vehicles) {
+      const coll = LIVE_COLL[(v.deviceType || '').toUpperCase()];
+      if (!coll || !v.imei) continue;
+      if (!byColl.has(coll)) byColl.set(coll, new Set());
+      byColl.get(coll).add(v.imei);
+      byColl.get(coll).add(v.imei.startsWith('0') ? v.imei.slice(1) : '0' + v.imei);
+    }
+    await Promise.all([...byColl.entries()].map(async ([coll, imeiSet]) => {
+      const docs = await db.collection(coll).aggregate([
+        { $match: { imei: { $in: [...imeiSet] }, latitude: { $ne: null } } },
+        { $sort: { imei: 1, timestamp: -1 } },
+        { $group: { _id: '$imei', doc: { $first: '$$ROOT' } } },
+      ], { allowDiskUse: true }).toArray();
+      for (const r of docs) latest.set(_imeiKey(r._id), r.doc);
+    }));
+  } catch (e) {
+    console.warn('[livePositions] MongoDB overlay failed, falling back to MySQL state:', e.message);
+  }
 
-  return states.map(s => {
-    const v = vehicleMap.get(s.vehicleId);
-    if (!v) return null;
-    const ts  = s.lastSeenAt || s.updatedAt;
-    const age = ts ? (Date.now() - new Date(ts).getTime()) : Infinity;
-    // Age of the last GPS-bearing packet (lastGpsPacketTime only advances on GPS
-    // packets). If there's no recent GPS fix, speed/movement are stale.
-    const gpsTs   = s.lastGpsPacketTime;
-    const gpsStale = !gpsTs || (Date.now() - new Date(gpsTs).getTime()) > GPS_STALE_MS;
+  return vehicles.map(v => {
+    const s = stateMap.get(v.id) || {};
+    const m = latest.get(_imeiKey(v.imei)); // newest GPS fix (fresh) or undefined
+
+    const lat = m && m.latitude  != null ? parseFloat(m.latitude)  : (s.lastLat != null ? parseFloat(s.lastLat) : null);
+    const lng = m && m.longitude != null ? parseFloat(m.longitude) : (s.lastLng != null ? parseFloat(s.lastLng) : null);
+    const speed = m ? (m.speed != null ? Number(m.speed) : 0) : (s.lastSpeed ?? null);
+    const engineOn = m
+      ? (m.ignition != null ? Boolean(Number(m.ignition)) : (m.acc != null ? Boolean(m.acc) : (s.engineOn ?? false)))
+      : (s.engineOn ?? false);
+    // "Last heard" = MongoDB server insert time (fresh) over the lagging state row.
+    const lastSeenAt = (m && (m.createdAt || m.serverTimestamp)) || s.lastSeenAt || null;
+
     return {
-      id:            v.id,
-      vehicleNumber: v.vehicleNumber,
-      deviceType:    v.deviceType,
-      vehicleIcon:   v.vehicleIcon,
-      lat:           s.lastLat  ? parseFloat(s.lastLat)  : null,
-      lng:           s.lastLng  ? parseFloat(s.lastLng)  : null,
-      // Speed/motion come ONLY from the latest GPS fix — null when it's stale so
-      // the UI doesn't show a leftover speed from when the vehicle last moved.
-      speed:         gpsStale ? null : (s.lastSpeed ?? 0),
-      engineOn:      s.engineOn ?? false,   // ignition IS present in heartbeats — keep it
-      firstSeenAt:   s.firstSeenAt ?? null,
-      lastSeenAt:    s.lastSeenAt  ?? null,
-      lastPacketTime:s.lastPacketTime ?? null,
-      registeredAt:  v.createdAt ?? null,
-      speedZeroSince: s.speedZeroSince  ?? null,
-      engineOffSince: s.engineOffSince  ?? null,
-      runningStreak:  (gpsStale || age > 90_000) ? 0 : (s.runningStreak ?? 0),
-      movement:       gpsStale ? null : (s.lastMovement ?? null),
+      id:             v.id,
+      vehicleNumber:  v.vehicleNumber,
+      deviceType:     v.deviceType,
+      vehicleIcon:    v.vehicleIcon,
+      lat, lng, speed, engineOn,
+      firstSeenAt:    s.firstSeenAt ?? null,
+      lastSeenAt,
+      lastPacketTime: (m && m.timestamp) || s.lastPacketTime || null,
+      registeredAt:   v.createdAt ?? null,
+      speedZeroSince: s.speedZeroSince ?? null,
+      engineOffSince: s.engineOffSince ?? null,
+      runningStreak:  s.runningStreak ?? 0,
+      movement:       s.lastMovement ?? null,
     };
-  }).filter(Boolean);
+  });
 };
 
 module.exports = { getVehicles, getVehicleById, addVehicle, updateVehicle, reassignVehicle, deleteVehicle, syncVehicleData, testGpsData, getLocationPlayerData, getLivePositions, getEditHistory };
