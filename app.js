@@ -115,6 +115,10 @@ app.get('/api/health/mongo', (req, res) => {
 
 // Registry updated by watchCollection so /api/health/mongo can report stream state.
 const _activeStreams = [];
+// Live ChangeStream object per collection — lets us close the previous one
+// before opening a new one so reconnect retries can't accumulate zombie streams
+// (each zombie reprocesses every packet → duplicate DB writes + processing lag).
+const _streamHandles = new Map();
 
 // Serve React build + SPA fallback (production only — skipped when dist doesn't exist in dev)
 const clientDist = path.join(__dirname, '../client/dist');
@@ -288,6 +292,15 @@ function enqueuePacket(imei, fn) {
 }
 
 function watchCollection(colName, deviceType, retryMs = 5000) {
+  // Close + detach any existing stream for this collection FIRST, so a reconnect
+  // retry never leaves a second (zombie) stream running on the same collection.
+  const prev = _streamHandles.get(colName);
+  if (prev) {
+    try { prev.removeAllListeners?.(); } catch { /* noop */ }
+    prev.close?.().catch(() => {});
+    _streamHandles.delete(colName);
+  }
+
   let stream;
   try {
     const db = getMongoDb();
@@ -297,6 +310,7 @@ function watchCollection(colName, deviceType, retryMs = 5000) {
     stream = col.watch([{ $match: { operationType: 'insert' } }], {
       fullDocument: 'updateLookup',
     });
+    _streamHandles.set(colName, stream);
 
     stream.on('change', (event) => {
       const doc = event.fullDocument;
@@ -311,10 +325,19 @@ function watchCollection(colName, deviceType, retryMs = 5000) {
       );
     });
 
+    // Retry EXACTLY ONCE per stream. A single failure usually fires both 'error'
+    // AND 'close'; without this guard each fired a separate retry → two (then
+    // four, …) replacement streams that all reprocess every packet.
+    let retryScheduled = false;
     const scheduleRetry = (err) => {
+      if (retryScheduled) return;
+      retryScheduled = true;
       const wait = Math.min(retryMs * 2, 60000);
       console.warn(`[ChangeStream:${colName}] ${err.message} — retrying in ${wait / 1000}s`);
-      stream.close().catch(() => {});
+      try { stream.removeAllListeners?.(); } catch { /* noop */ }
+      stream.close?.().catch(() => {});
+      if (_streamHandles.get(colName) === stream) _streamHandles.delete(colName);
+      const e = _activeStreams.find(s => s.colName === colName); if (e) e.alive = false;
       setTimeout(() => {
         // After each stream restart, run a catchup to pick up any packets that
         // arrived while the stream was down.  This is the main fix for the
@@ -325,7 +348,6 @@ function watchCollection(colName, deviceType, retryMs = 5000) {
     };
 
     stream.on('error', scheduleRetry);
-
     stream.on('close', () => {
       if (mongoose.connection.readyState === 1) {
         scheduleRetry(new Error('stream closed unexpectedly'));
@@ -335,12 +357,11 @@ function watchCollection(colName, deviceType, retryMs = 5000) {
     const entry = { colName, deviceType, alive: true, startedAt: new Date().toISOString() };
     const existing = _activeStreams.findIndex(s => s.colName === colName);
     if (existing >= 0) _activeStreams[existing] = entry; else _activeStreams.push(entry);
-    stream.on('close', () => { const e = _activeStreams.find(s => s.colName === colName); if (e) e.alive = false; });
-    stream.on('error', () => { const e = _activeStreams.find(s => s.colName === colName); if (e) e.alive = false; });
     console.log(`✓ Change stream watching ${colName} (${deviceType})`);
   } catch (err) {
     console.warn(`[ChangeStream:${colName}] Failed to start:`, err.message);
-    if (stream) stream.close().catch(() => {});
+    if (stream) stream.close?.().catch(() => {});
+    if (_streamHandles.get(colName) === stream) _streamHandles.delete(colName);
     setTimeout(() => {
       watchCollection(colName, deviceType, Math.min(retryMs * 2, 60000));
       triggerCatchup(`${colName} stream failed to start: ${err.message}`);
