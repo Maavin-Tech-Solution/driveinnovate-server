@@ -218,7 +218,11 @@ const getLocationPlayerData = async (req, res) => {
  */
 const getLivePositions = async (req, res) => {
   try {
-    let effectiveClientId = req.user.id;
+    // Default scope = the user's FULL network (matches getVehicles), so every
+    // vehicle rendered on the map also receives live position updates. Defaulting
+    // to req.user.id alone meant papa/dealer network vehicles loaded on the map
+    // but never got live updates — they only moved on a manual refresh.
+    let effectiveClientId = req.user.clientIds || [req.user.id];
     if (req.query.clientId) {
       const targetId = Number(req.query.clientId);
       if (!req.user.clientIds?.includes(targetId)) {

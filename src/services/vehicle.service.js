@@ -1412,18 +1412,6 @@ const getLivePositions = async (clientId /*, since */) => {
     };
   });
 
-  // TEMP DIAGNOSTIC — log the user's tracked vehicle (id=30) plus any genuinely
-  // moving + freshly-reporting vehicle, with the picked packet's DEVICE timestamp
-  // vs its INSERT time, so the log alone shows if live-positions returns a fresh
-  // position. Remove once confirmed.
-  const isFresh = (r) => r.lastSeenAt && (Date.now() - new Date(r.lastSeenAt).getTime() < 60000);
-  const probes = [out.find(r => r.id === 30), out.find(r => (r.speed || 0) > 5 && isFresh(r))];
-  for (const r of probes) {
-    if (!r) continue;
-    const m = latest.get(_imeiKey(vehicles.find(v => v.id === r.id)?.imei));
-    console.log(`[livePos] id=${r.id} lat=${r.lat} lng=${r.lng} spd=${r.speed} src=${m ? 'MONGO' : 'state'} docTs=${m && m.timestamp ? new Date(m.timestamp).toISOString() : '-'} ins=${m && m.createdAt ? new Date(m.createdAt).toISOString() : '-'} seen=${r.lastSeenAt ? new Date(r.lastSeenAt).toISOString() : '-'}`);
-  }
-
   return out;
 };
 
