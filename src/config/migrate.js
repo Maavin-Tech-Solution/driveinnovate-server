@@ -50,6 +50,10 @@ const MIGRATIONS = [
   // ── di_user (account type & trial expiry) ─────────────────────────────────
   { table: 'di_user', column: 'account_type',    ddl: "ENUM('trial','billable','demo','master') NOT NULL DEFAULT 'trial' COMMENT \"Account subscription type\"" },
   { table: 'di_user', column: 'trial_expires_at', ddl: 'DATETIME NULL COMMENT "Trial expiry timestamp; NULL = no expiry enforced"' },
+  { table: 'di_user', column: 'kind',             ddl: "ENUM('account','member') NOT NULL DEFAULT 'account' COMMENT \"account=papa/dealer/client hierarchy user; member=restricted team-member login\"" },
+
+  // ── di_user_permissions (Teams feature) ───────────────────────────────────
+  { table: 'di_user_permissions', column: 'can_manage_teams', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Can create/manage teams and team members"' },
 
   // ── SmartChallan integration settings ────────────────────────────────────
   { table: 'di_user', column: 'sc_enabled',          ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Master toggle for SmartChallan integration\"" },

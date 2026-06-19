@@ -1,4 +1,5 @@
 const vehicleService = require('../services/vehicle.service');
+const { buildVehicleScope } = require('../utils/vehicleScope');
 
 /**
  * GET /api/vehicles
@@ -10,18 +11,8 @@ const vehicleService = require('../services/vehicle.service');
  */
 const getVehicles = async (req, res) => {
   try {
-    let effectiveClientId;
-    if (req.query.clientId) {
-      const targetId = Number(req.query.clientId);
-      if (!req.user.clientIds?.includes(targetId)) {
-        return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
-      }
-      effectiveClientId = targetId;
-    } else {
-      // Default scope = the user's full network. Sequelize treats an array as IN.
-      effectiveClientId = req.user.clientIds || [req.user.id];
-    }
-    const vehicles = await vehicleService.getVehicles(effectiveClientId);
+    const scope = buildVehicleScope(req.user, req.query.clientId);
+    const vehicles = await vehicleService.getVehicles(scope);
     return res.json({ success: true, data: vehicles });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
@@ -218,19 +209,10 @@ const getLocationPlayerData = async (req, res) => {
  */
 const getLivePositions = async (req, res) => {
   try {
-    // Default scope = the user's FULL network (matches getVehicles), so every
-    // vehicle rendered on the map also receives live position updates. Defaulting
-    // to req.user.id alone meant papa/dealer network vehicles loaded on the map
-    // but never got live updates — they only moved on a manual refresh.
-    let effectiveClientId = req.user.clientIds || [req.user.id];
-    if (req.query.clientId) {
-      const targetId = Number(req.query.clientId);
-      if (!req.user.clientIds?.includes(targetId)) {
-        return res.status(403).json({ success: false, message: 'You do not have access to this client.' });
-      }
-      effectiveClientId = targetId;
-    }
-    const data = await vehicleService.getLivePositions(effectiveClientId, req.query.since);
+    // SAME scope as getVehicles (via buildVehicleScope) so every vehicle on the
+    // map also gets live updates — accounts by ownership, members by team.
+    const scope = buildVehicleScope(req.user, req.query.clientId);
+    const data = await vehicleService.getLivePositions(scope);
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

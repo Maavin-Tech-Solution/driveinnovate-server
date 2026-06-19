@@ -3,7 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { Op, UniqueConstraintError } = require('sequelize');
-const { User, UserMeta, UserActivity, AuthOtp } = require('../models');
+const { User, UserMeta, UserActivity, AuthOtp, TeamMember, TeamVehicle } = require('../models');
 const { getPermissions } = require('./permission.service');
 const { getSystemSettings } = require('./master.service');
 
@@ -21,7 +21,9 @@ const getAllDescendants = async (rootId) => {
   let batch = [rootId];
   while (batch.length > 0) {
     const children = await User.findAll({
-      where: { parentId: batch },
+      // Only hierarchy accounts count as descendants — team-member logins
+      // (kind='member') are NOT part of the papa/dealer/client tree.
+      where: { parentId: batch, kind: 'account' },
       attributes: ['id'],
       raw: true,
     });
@@ -34,18 +36,38 @@ const getAllDescendants = async (rootId) => {
 };
 
 /**
- * Determine role + network for a user:
+ * Resolve the vehicle ids a team member can see = the union of vehicles assigned
+ * to every team they belong to. Two cheap indexed queries.
+ */
+const getMemberVehicleIds = async (userId) => {
+  const memberships = await TeamMember.findAll({ where: { userId }, attributes: ['teamId'], raw: true });
+  const teamIds = memberships.map(m => m.teamId);
+  if (!teamIds.length) return [];
+  const tvs = await TeamVehicle.findAll({ where: { teamId: teamIds }, attributes: ['vehicleId'], raw: true });
+  return [...new Set(tvs.map(t => t.vehicleId))];
+};
+
+/**
+ * Determine role + scope for a user:
  *   papa   — parentId === 0 (top-level account)
- *   dealer — has children but parentId != 0
- *   client — no children
- * clientIds includes the user's own id + all descendant ids.
+ *   dealer — account with child accounts, parentId != 0
+ *   client — account, no child accounts
+ *   member — kind='member' restricted login (owns no vehicles; scoped to its teams)
+ * `clientIds` (ownership scope) is [self, ...descendant accounts] for accounts, []
+ * for members. Members instead carry `teamVehicleIds` (id-based vehicle scope).
  */
 const resolveUserRole = async (user) => {
+  // Team-member login — restricted, outside the hierarchy.
+  if (user.kind === 'member') {
+    const teamVehicleIds = await getMemberVehicleIds(user.id);
+    return { role: 'member', hasClients: false, clientIds: [], teamVehicleIds };
+  }
   if (Number(user.parentId) === 0) {
     const descendants = await getAllDescendants(user.id);
     return { role: 'papa', hasClients: true, clientIds: [user.id, ...descendants] };
   }
-  const childCount = await User.count({ where: { parentId: user.id } });
+  // Only child ACCOUNTS make a user a dealer — members do not.
+  const childCount = await User.count({ where: { parentId: user.id, kind: 'account' } });
   if (childCount > 0) {
     const descendants = await getAllDescendants(user.id);
     return { role: 'dealer', hasClients: true, clientIds: [user.id, ...descendants] };

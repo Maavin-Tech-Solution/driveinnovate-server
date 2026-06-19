@@ -29,6 +29,7 @@ const UserPermission = sequelize.define(
     canViewRTO: { type: DataTypes.BOOLEAN, defaultValue: false },
     canViewChallans: { type: DataTypes.BOOLEAN, defaultValue: false },
     canViewNotifications: { type: DataTypes.BOOLEAN, defaultValue: false },
+    canManageTeams: { type: DataTypes.BOOLEAN, defaultValue: false },
   },
   {
     tableName: 'di_user_permissions',

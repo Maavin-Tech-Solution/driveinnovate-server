@@ -842,13 +842,13 @@ const attachComprehensiveStatus = async (vehicle) => {
   return { ...vehicleJson, deviceStatus };
 };
 
-// Accepts either a single client id (drilldown into one child) or an array
-// of ids (the full network array `[self, ...descendants]` for papa/dealer
-// dashboards). Sequelize treats array values as an IN clause.
-const getVehicles = async (clientId) => {
-  console.log('[GET_VEHICLES] Fetching vehicles for client(s):', Array.isArray(clientId) ? `[${clientId.length} ids]` : clientId);
+// Accepts a Sequelize vehicle-scope where-fragment from buildVehicleScope():
+//   { clientId: <id|[ids]> }  (account ownership scope) or
+//   { id: [ids] }             (team-member scope).
+const getVehicles = async (scope) => {
+  console.log('[GET_VEHICLES] scope:', JSON.stringify(scope));
   const vehicles = await Vehicle.findAll({
-    where: { clientId, status: { [Op.ne]: 'deleted' } },
+    where: { ...scope, status: { [Op.ne]: 'deleted' } },
     include: [{ model: RtoDetail, as: 'rtoDetail' }]
   });
   
@@ -1331,7 +1331,7 @@ const LIVE_COLL = {
 };
 const _imeiKey = (imei) => (imei || '').replace(/^0+/, ''); // normalise leading zeros
 
-const getLivePositions = async (clientId /*, since */) => {
+const getLivePositions = async (scope /*, since */) => {
   // Real-time map poll. The change-stream → VehicleDeviceState pipeline can fall
   // minutes behind under heavy packet load (its lastSeenAt looks fresh because
   // it's stamped at PROCESS time, but lastLat is whatever old packet is being
@@ -1343,7 +1343,7 @@ const getLivePositions = async (clientId /*, since */) => {
   // `since` is intentionally ignored: we always return the full fleet so a moving
   // vehicle can never be starved out by a watermark cursor.
   const vehicles = await Vehicle.findAll({
-    where: { clientId, status: { [Op.ne]: 'deleted' } },
+    where: { ...scope, status: { [Op.ne]: 'deleted' } },
     attributes: ['id', 'imei', 'vehicleNumber', 'deviceType', 'vehicleIcon'],
   });
   if (!vehicles.length) return [];

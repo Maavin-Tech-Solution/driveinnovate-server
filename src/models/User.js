@@ -45,6 +45,16 @@ const User = sequelize.define(
       allowNull: true,
       comment: 'When null on a trial account, no expiry is enforced',
     },
+    // account = papa/dealer/client hierarchy user (owns vehicles, derives role
+    // from the parentId tree). member = a restricted team-member login that owns
+    // no vehicles and is scoped to its teams' assigned vehicles. Members are
+    // EXCLUDED from role/descendant derivation so adding members never promotes
+    // a client to "dealer".
+    kind: {
+      type: DataTypes.ENUM('account', 'member'),
+      allowNull: false,
+      defaultValue: 'account',
+    },
     // SmartChallan integration
     scEnabled:        { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_enabled' },
     scUsername:       { type: DataTypes.STRING(255), allowNull: true, field: 'sc_username' },

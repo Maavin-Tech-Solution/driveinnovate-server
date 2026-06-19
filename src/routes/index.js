@@ -21,6 +21,7 @@ const permissionRoutes = require('./permission.routes');
 const masterRoutes = require('./master.routes');
 const contactRoutes      = require('./contact.routes');
 const smartchallanRoutes = require('./smartchallan.routes');
+const teamRoutes         = require('./team.routes');
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -42,5 +43,6 @@ router.use('/permissions', permissionRoutes);
 router.use('/master', masterRoutes);
 router.use('/contact', contactRoutes);
 router.use('/smartchallan', smartchallanRoutes);
+router.use('/teams', teamRoutes);
 
 module.exports = router;

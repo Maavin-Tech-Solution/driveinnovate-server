@@ -132,7 +132,7 @@ const createClient = async (
 
 const listClients = async (parentUserId) => {
   const clients = await User.findAll({
-    where: { parentId: parentUserId },
+    where: { parentId: parentUserId, kind: 'account' }, // exclude team-member logins
     attributes: { exclude: ['password'] },
     include: [{ model: UserMeta, as: 'meta', required: false }],
     order: [['created_at', 'DESC']],
@@ -153,7 +153,7 @@ const listClients = async (parentUserId) => {
 
   // Batch: sub-client count per client
   const scRows = await User.findAll({
-    where: { parentId: ids },
+    where: { parentId: ids, kind: 'account' }, // exclude team-member logins from sub-client counts
     attributes: ['parentId', [fn('COUNT', col('id')), 'cnt']],
     group: ['parentId'],
     raw: true,
@@ -186,7 +186,7 @@ const getClientDetail = async (callerClientIds, clientId) => {
 
   // Direct sub-clients
   const subClients = await User.findAll({
-    where: { parentId: clientId },
+    where: { parentId: clientId, kind: 'account' }, // exclude team-member logins
     attributes: { exclude: ['password'] },
     include: [{ model: UserMeta, as: 'meta', required: false }],
     order: [['created_at', 'DESC']],

@@ -29,6 +29,9 @@ const StateDefinition = require('./StateDefinition');
 const SystemSetting = require('./SystemSetting');
 const VehicleCustomField = require('./VehicleCustomField');
 const VehicleEditHistory = require('./VehicleEditHistory');
+const Team = require('./Team');
+const TeamVehicle = require('./TeamVehicle');
+const TeamMember = require('./TeamMember');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -142,6 +145,22 @@ VehicleGroupMember.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' }
 VehicleGroup.belongsToMany(Vehicle, { through: VehicleGroupMember, foreignKey: 'groupId', otherKey: 'vehicleId', as: 'vehicles' });
 Vehicle.belongsToMany(VehicleGroup, { through: VehicleGroupMember, foreignKey: 'vehicleId', otherKey: 'groupId', as: 'groups' });
 
+// Teams (access-control grouping: owner → vehicles subset + member logins)
+User.hasMany(Team, { foreignKey: 'ownerId', as: 'teams' });
+Team.belongsTo(User, { foreignKey: 'ownerId', as: 'owner' });
+
+Team.belongsToMany(Vehicle, { through: TeamVehicle, foreignKey: 'teamId', otherKey: 'vehicleId', as: 'vehicles' });
+Vehicle.belongsToMany(Team, { through: TeamVehicle, foreignKey: 'vehicleId', otherKey: 'teamId', as: 'teams' });
+Team.hasMany(TeamVehicle, { foreignKey: 'teamId', as: 'teamVehicles' });
+TeamVehicle.belongsTo(Team, { foreignKey: 'teamId', as: 'team' });
+TeamVehicle.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+Team.belongsToMany(User, { through: TeamMember, foreignKey: 'teamId', otherKey: 'userId', as: 'members' });
+User.belongsToMany(Team, { through: TeamMember, foreignKey: 'userId', otherKey: 'teamId', as: 'memberTeams' });
+Team.hasMany(TeamMember, { foreignKey: 'teamId', as: 'teamMembers' });
+TeamMember.belongsTo(Team, { foreignKey: 'teamId', as: 'team' });
+TeamMember.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
 module.exports = {
   UserSettings,
   sequelize,
@@ -174,4 +193,7 @@ module.exports = {
   SystemSetting,
   VehicleCustomField,
   VehicleEditHistory,
+  Team,
+  TeamVehicle,
+  TeamMember,
 };
