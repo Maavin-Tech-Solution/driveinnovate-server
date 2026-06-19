@@ -166,8 +166,50 @@ const listAssignableVehicles = async (owner) => {
   });
 };
 
+// Per-vehicle toggle (matches the Groups page's immediate add/remove UX).
+const addVehicle = async (owner, teamId, vehicleId) => {
+  await assertOwnedTeam(owner, teamId);
+  const ok = await Vehicle.findOne({ where: { ...buildVehicleScope(owner), id: vehicleId }, attributes: ['id'], raw: true });
+  if (!ok) err(400, 'Vehicle is not in your fleet');
+  await TeamVehicle.findOrCreate({ where: { teamId, vehicleId }, defaults: { teamId, vehicleId } });
+  return { teamId: Number(teamId), vehicleId: Number(vehicleId) };
+};
+
+const removeVehicle = async (owner, teamId, vehicleId) => {
+  await assertOwnedTeam(owner, teamId);
+  await TeamVehicle.destroy({ where: { teamId, vehicleId } });
+  return { teamId: Number(teamId), vehicleId: Number(vehicleId) };
+};
+
+// The owner's full member pool with each member's team ids — so the UI can show
+// which teams a member already belongs to and assign them to more.
+const listMembers = async (owner) => {
+  const members = await User.findAll({
+    where: { parentId: owner.id, kind: 'member' },
+    attributes: ['id', 'name', 'email', 'phone', 'status'],
+    include: [{ model: UserPermission, as: 'permissions', required: false }],
+    order: [['created_at', 'DESC']],
+  });
+  if (!members.length) return [];
+  const tm = await TeamMember.findAll({ where: { userId: members.map(m => m.id) }, attributes: ['userId', 'teamId'], raw: true });
+  const teamMap = {};
+  for (const r of tm) { if (!teamMap[r.userId]) teamMap[r.userId] = []; teamMap[r.userId].push(r.teamId); }
+  return members.map(m => ({ ...m.toJSON(), teamIds: teamMap[m.id] || [] }));
+};
+
+// Attach an EXISTING member (already under this owner) to a team — this is what
+// lets one member belong to MULTIPLE teams. Reactivates a revoked member.
+const attachMember = async (owner, teamId, userId) => {
+  await assertOwnedTeam(owner, teamId);
+  const member = await assertOwnedMember(owner, userId);
+  if (member.status !== 'active') await member.update({ status: 'active' });
+  await TeamMember.findOrCreate({ where: { teamId, userId }, defaults: { teamId, userId } });
+  return { teamId: Number(teamId), userId: Number(userId) };
+};
+
 module.exports = {
   listTeams, createTeam, updateTeam, deleteTeam, getTeam,
-  setTeamVehicles, addMember, removeMember, deleteMember, setMemberPermissions,
-  listAssignableVehicles,
+  setTeamVehicles, addVehicle, removeVehicle,
+  addMember, attachMember, removeMember, deleteMember, setMemberPermissions,
+  listMembers, listAssignableVehicles,
 };
