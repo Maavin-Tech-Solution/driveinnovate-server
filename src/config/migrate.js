@@ -55,6 +55,9 @@ const MIGRATIONS = [
   // ── di_user_permissions (Teams feature) ───────────────────────────────────
   { table: 'di_user_permissions', column: 'can_manage_teams', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Can create/manage teams and team members"' },
 
+  // ── user_settings (Menu Manager) ──────────────────────────────────────────
+  { table: 'user_settings', column: 'menu_config', ddl: 'JSON NULL COMMENT "Per-user custom 2-level sidebar layout { groups:[{label,items[]}] }"' },
+
   // ── SmartChallan integration settings ────────────────────────────────────
   { table: 'di_user', column: 'sc_enabled',          ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Master toggle for SmartChallan integration\"" },
   { table: 'di_user', column: 'sc_username',          ddl: "VARCHAR(255) NULL COMMENT \"SmartChallan login email\"" },

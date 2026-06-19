@@ -33,6 +33,14 @@ const UserSettings = sequelize.define(
       field: 'speed_threshold',
       defaultValue: 80,
     },
+    // Per-user custom 2-level sidebar layout, built in the Menu Manager.
+    // Shape: { groups: [{ label, items: [pageKey, ...] }] }. null = use default.
+    menuConfig: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      field: 'menu_config',
+      defaultValue: null,
+    },
     createdAt: {
       type: DataTypes.DATE,
       field: 'created_at',

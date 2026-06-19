@@ -28,7 +28,7 @@ const getUserSettings = async (userId) => {
  * Update user settings
  */
 const updateUserSettings = async (userId, data) => {
-  const { speedRanges, speedThreshold } = data;
+  const { speedRanges, speedThreshold, menuConfig } = data;
   
   // Validate speed ranges
   if (speedRanges) {
@@ -73,6 +73,7 @@ const updateUserSettings = async (userId, data) => {
     await settings.update({
       ...(speedRanges && { speedRanges }),
       ...(speedThreshold !== undefined && { speedThreshold }),
+      ...(menuConfig !== undefined && { menuConfig }),
     });
   } else {
     // Create new settings
@@ -86,9 +87,10 @@ const updateUserSettings = async (userId, data) => {
         { min: 120, max: 999, color: '#dc2626', label: 'Overspeed' },
       ],
       speedThreshold: speedThreshold !== undefined ? speedThreshold : 80,
+      ...(menuConfig !== undefined && { menuConfig }),
     });
   }
-  
+
   return settings;
 };
 
