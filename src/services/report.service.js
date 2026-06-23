@@ -728,13 +728,28 @@ class ReportService {
         order: [['vehicleId', 'ASC'], ['startTime', 'ASC'], ['endTime', 'DESC']],
       });
 
-      const deduped = this._dedupeTrips(rows);
+      // Drop corrupt trips: hide them from the report AND delete them from the DB.
+      const corruptIds = [];
+      const validRows = [];
+      for (const t of rows) {
+        if (this._isCorruptTrip(t)) corruptIds.push(t.id);
+        else validRows.push(t);
+      }
+      if (corruptIds.length) {
+        Trip.destroy({ where: { id: corruptIds } })
+          .then(() => console.log(`[trips] removed ${corruptIds.length} corrupt trip(s)`))
+          .catch(e => console.warn('[trips] corrupt cleanup failed:', e.message));
+      }
+
+      const deduped = this._dedupeTrips(validRows);
 
       // Newest first for display
       deduped.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
 
       const total = deduped.length;
-      const paged = deduped.slice(offset, offset + limit);
+      // Normalize coordinates for display (India is N/E — negative lat/lng is a
+      // device sign/hemisphere bug, so we surface the absolute value).
+      const paged = deduped.slice(offset, offset + limit).map(t => this._normalizeTripCoords(t));
       const stats = this._tripStatsFromList(deduped);
 
       return {
@@ -774,6 +789,38 @@ class ReportService {
       }
     }
     return kept;
+  }
+
+  /**
+   * A trip row is "corrupt" if its core values are physically impossible. Kept
+   * deliberately CONSERVATIVE so real (even short / GPS-noisy) trips survive.
+   * @private
+   */
+  _isCorruptTrip(t) {
+    const start = new Date(t.startTime).getTime();
+    const end   = new Date(t.endTime).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return true; // bad timing
+    const dur  = Number(t.duration);
+    const dist = Number(t.distance);
+    if (!Number.isFinite(dur)  || dur  <= 0) return true;   // non-positive duration
+    if (!Number.isFinite(dist) || dist <  0) return true;   // negative / NaN distance
+    const hours = dur / 3600;
+    if (hours > 0 && dist / hours > 250) return true;       // teleport — impossible avg speed
+    if (Number(t.maxSpeed) > 300) return true;              // impossible peak speed
+    return false;
+  }
+
+  /**
+   * Return a plain trip object with start/end coordinates normalised to positive
+   * (India is N/E; negative values are device sign/hemisphere bugs).
+   * @private
+   */
+  _normalizeTripCoords(t) {
+    const o = typeof t.toJSON === 'function' ? t.toJSON() : { ...t };
+    for (const k of ['startLatitude', 'startLongitude', 'endLatitude', 'endLongitude']) {
+      if (o[k] != null && Number(o[k]) < 0) o[k] = Math.abs(Number(o[k]));
+    }
+    return o;
   }
 
   /**

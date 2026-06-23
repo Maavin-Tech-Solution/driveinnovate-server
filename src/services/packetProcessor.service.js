@@ -609,6 +609,12 @@ async function processPacketInner(doc, deviceType, _state) {
     // the pending close is cancelled and the trip continues seamlessly.
     // ══════════════════════════════════════════════════════════════════════════
 
+    // ── Out-of-order / replayed packets (catch-up, clock skew) must NEVER drive
+    //    the trip lifecycle. Doing so opened trips with stale start times and
+    //    closed them with end < start (duration 0), generating ~44M garbage
+    //    trips. Such packets still update position/state below — they just don't
+    //    open, close, or mutate trips here. ──────────────────────────────────────
+    if (!isOutOfOrder) {
     if (ignitionOn && speed > TRIP_START_SPEED && !state.currentTripId) {
       // ── START new trip ──────────────────────────────────────────────────────
       state.engineOffSince = null; // clear any pending off
@@ -758,6 +764,7 @@ async function processPacketInner(doc, deviceType, _state) {
       // Ignition ON but speed ≤ threshold — no trip yet, just clear pending off
       state.engineOffSince = null;
     }
+    } // end if (!isOutOfOrder) — trip lifecycle is in-order packets only
 
     // ── Persist live device state ──────────────────────────────────────────────
     // Always update engineOn — the realTime guard was removed because many GT06
