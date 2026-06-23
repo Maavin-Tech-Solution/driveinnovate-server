@@ -473,7 +473,10 @@ async function processPacketInner(doc, deviceType, _state) {
       if (gapMs > TRIP_GPS_GAP_MS) {
         const trip = await Trip.findByPk(state.currentTripId);
         if (trip && trip.status === 'in_progress') {
-          const gapEndTime = new Date(state.lastGpsPacketTime);
+          const gapEndTime = new Date(Math.max(
+            new Date(state.lastGpsPacketTime).getTime(),
+            new Date(trip.startTime).getTime()
+          ));
           const dur = Math.max(0, Math.floor(
             (gapEndTime.getTime() - new Date(trip.startTime).getTime()) / 1000
           ));
@@ -654,8 +657,12 @@ async function processPacketInner(doc, deviceType, _state) {
         // Confirmed OFF for long enough — close the trip
         const trip = await Trip.findByPk(state.currentTripId);
         if (trip && trip.status === 'in_progress') {
-          // Use the moment ignition first went OFF as the real trip end
-          const realEndTime = new Date(state.engineOffSince);
+          // Use the moment ignition first went OFF as the real trip end — never
+          // earlier than the trip's own start (belt-and-suspenders vs stale ts).
+          const realEndTime = new Date(Math.max(
+            new Date(state.engineOffSince).getTime(),
+            new Date(trip.startTime).getTime()
+          ));
           const durationSec = Math.max(0, Math.floor(
             (realEndTime.getTime() - new Date(trip.startTime).getTime()) / 1000
           ));
@@ -689,7 +696,10 @@ async function processPacketInner(doc, deviceType, _state) {
           // Vehicle idle for too long — close the trip at the moment speed first dropped
           const trip = await Trip.findByPk(state.currentTripId);
           if (trip && trip.status === 'in_progress') {
-            const realEndTime = new Date(state.engineOffSince);
+            const realEndTime = new Date(Math.max(
+              new Date(state.engineOffSince).getTime(),
+              new Date(trip.startTime).getTime()
+            ));
             const durationSec = Math.max(0, Math.floor(
               (realEndTime.getTime() - new Date(trip.startTime).getTime()) / 1000
             ));
@@ -965,7 +975,9 @@ async function reconcileStaleTrips() {
 
           if (!shouldClose) { lastErr = null; break; }
 
-          const endTime = trip.endTime || state?.lastPacketTime || new Date();
+          // Never persist an end before the trip's own start.
+          const rawEnd  = trip.endTime || state?.lastPacketTime || new Date();
+          const endTime = new Date(Math.max(new Date(rawEnd).getTime(), new Date(trip.startTime).getTime()));
           const durationSec = Math.max(
             0,
             Math.floor((new Date(endTime).getTime() - new Date(trip.startTime).getTime()) / 1000)

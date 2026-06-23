@@ -799,14 +799,18 @@ class ReportService {
   _isCorruptTrip(t) {
     const start = new Date(t.startTime).getTime();
     const end   = new Date(t.endTime).getTime();
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return true; // bad timing
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return true;
+    if (end < start) return true;                            // end before start — impossible
+    const completed = t.status === 'completed';
     const dur  = Number(t.duration);
     const dist = Number(t.distance);
-    if (!Number.isFinite(dur)  || dur  <= 0) return true;   // non-positive duration
-    if (!Number.isFinite(dist) || dist <  0) return true;   // negative / NaN distance
+    // A still-running trip legitimately has duration 0 / end==start, so only
+    // judge duration & speed on COMPLETED trips.
+    if (completed && (!Number.isFinite(dur) || dur <= 0)) return true;
+    if (!Number.isFinite(dist) || dist < 0) return true;     // negative / NaN distance
     const hours = dur / 3600;
-    if (hours > 0 && dist / hours > 250) return true;       // teleport — impossible avg speed
-    if (Number(t.maxSpeed) > 300) return true;              // impossible peak speed
+    if (completed && hours > 0 && dist / hours > 250) return true; // teleport
+    if (Number(t.maxSpeed) > 300) return true;               // impossible peak speed
     return false;
   }
 
