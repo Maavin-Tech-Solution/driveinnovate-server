@@ -1,16 +1,17 @@
 const dashboardService = require('../services/dashboard.service');
+const { buildVehicleScope } = require('../utils/vehicleScope');
 
-// All "user-scoped" dashboard endpoints actually roll up across the user's
-// full network (`req.user.clientIds = [self, ...descendants]`). For solo
-// users this collapses to their own data, so behaviour is unchanged for them.
-const networkScope = (req) => req.user.clientIds || [req.user.id];
+// Vehicle scope for the logged-in user: accounts roll up across their network
+// ({clientId:[self,...descendants]}); members are scoped to their teams' assigned
+// vehicles ({id:[...]}). Without this, members (clientIds = []) got empty stats.
+const scopeFor = (req) => buildVehicleScope(req.user);
 
 /**
  * GET /api/dashboard/stats
  */
 const getStats = async (req, res) => {
   try {
-    const stats = await dashboardService.getStats(networkScope(req));
+    const stats = await dashboardService.getStats(scopeFor(req));
     return res.json({ success: true, data: stats });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
@@ -22,7 +23,7 @@ const getStats = async (req, res) => {
  */
 const getUserStats = async (req, res) => {
   try {
-    const stats = await dashboardService.getUserStats(networkScope(req));
+    const stats = await dashboardService.getUserStats(scopeFor(req));
     return res.json({ success: true, data: stats });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
@@ -35,7 +36,7 @@ const getUserStats = async (req, res) => {
 const getOverspeedVehicles = async (req, res) => {
   try {
     const speedThreshold = parseInt(req.query.threshold) || 80;
-    const vehicles = await dashboardService.getOverspeedVehicles(networkScope(req), speedThreshold);
+    const vehicles = await dashboardService.getOverspeedVehicles(scopeFor(req), speedThreshold);
     return res.json({ success: true, data: vehicles });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

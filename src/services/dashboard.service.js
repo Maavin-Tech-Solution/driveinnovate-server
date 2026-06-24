@@ -2,10 +2,18 @@ const { Vehicle, Challan, RtoDetail, VehicleGroup, User } = require('../models')
 const { Op } = require('sequelize');
 const { Location } = require('../config/mongodb');
 
-const getStats = async (clientIds) => {
-  // Same network-aware semantics as getUserStats — accepts userId number or
-  // a full clientIds array. Counts roll up across the user's network.
-  const vehicles = await Vehicle.findAll({ where: { clientId: clientIds } });
+// Accepts either the legacy clientIds (number | number[]) OR a vehicle-scope
+// where-fragment from buildVehicleScope ({clientId:[...]} | {id:[...]}). The latter
+// lets member logins — which own no vehicles but are scoped to their teams'
+// assigned vehicle ids — get real dashboard stats.
+const vehWhere = (scope, extra = {}) => {
+  const base = (scope && typeof scope === 'object' && !Array.isArray(scope)) ? scope : { clientId: scope };
+  return { ...base, ...extra };
+};
+
+const getStats = async (scope) => {
+  // Accepts a clientIds array (accounts) or a {id:[...]} scope (members).
+  const vehicles = await Vehicle.findAll({ where: vehWhere(scope) });
   const vehicleIds = vehicles.map((v) => v.id);
 
   const [totalChallans, pendingChallans, challanAmountResult, vehicleRenewals] = await Promise.all([
@@ -42,8 +50,8 @@ const getStats = async (clientIds) => {
  *                                       network-wide stats; for solo users it
  *                                       degenerates to their own data.
  */
-const getUserStats = async (clientIds) => {
-  const vehicles = await Vehicle.findAll({ where: { clientId: clientIds }, attributes: ['id', 'status'] });
+const getUserStats = async (scope) => {
+  const vehicles = await Vehicle.findAll({ where: vehWhere(scope), attributes: ['id', 'status'] });
   const vehicleIds = vehicles.map((v) => v.id);
 
   const activeVehicles   = vehicles.filter((v) => v.status === 'active').length;
@@ -85,15 +93,11 @@ const getUserStats = async (clientIds) => {
  * @param {number} speedThreshold - Speed threshold in km/h
  * @returns {Promise<Array>} Array of vehicles with overspeed details
  */
-const getOverspeedVehicles = async (clientIds, speedThreshold = 80) => {
+const getOverspeedVehicles = async (scope, speedThreshold = 80) => {
   try {
-    // Network-aware: clientIds is the full [self, ...descendants] array for
-    // papa/dealer accounts and a single-element array for solo users.
+    // Accepts a clientIds array (accounts) or a {id:[...]} scope (members).
     const vehicles = await Vehicle.findAll({
-      where: {
-        clientId: clientIds,
-        status: 'active'
-      },
+      where: vehWhere(scope, { status: 'active' }),
       attributes: ['id', 'vehicleNumber', 'imei']
     });
 

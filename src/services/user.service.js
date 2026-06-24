@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const { UniqueConstraintError, fn, col, Op } = require('sequelize');
-const { sequelize, User, UserMeta, Vehicle } = require('../models');
+const { sequelize, User, UserMeta, Vehicle, TeamMember, TeamVehicle } = require('../models');
 const { getSystemSettings } = require('./master.service');
 
 const getProfile = async (userId) => {
@@ -130,9 +130,34 @@ const createClient = async (
   return clientWithoutPassword;
 };
 
+// Distinct assigned-vehicle count per member (union of vehicles across their
+// teams). Members own no vehicles, so their "vehicle count" comes from here.
+const _memberVehicleCounts = async (memberIds) => {
+  const out = {};
+  if (!memberIds.length) return out;
+  const tmRows = await TeamMember.findAll({ where: { userId: memberIds }, attributes: ['userId', 'teamId'], raw: true });
+  const teamIds = [...new Set(tmRows.map(r => r.teamId))];
+  const tvRows = teamIds.length
+    ? await TeamVehicle.findAll({ where: { teamId: teamIds }, attributes: ['teamId', 'vehicleId'], raw: true })
+    : [];
+  const teamVeh = {};
+  for (const r of tvRows) { (teamVeh[r.teamId] = teamVeh[r.teamId] || []).push(r.vehicleId); }
+  const memberTeams = {};
+  for (const r of tmRows) { (memberTeams[r.userId] = memberTeams[r.userId] || []).push(r.teamId); }
+  for (const uid of memberIds) {
+    const vset = new Set();
+    for (const tid of (memberTeams[uid] || [])) for (const vid of (teamVeh[tid] || [])) vset.add(vid);
+    out[uid] = vset.size;
+  }
+  return out;
+};
+
 const listClients = async (parentUserId) => {
+  // Include BOTH sub-account clients and team-member logins. `kind` distinguishes
+  // them so the UI can badge members; their vehicle count comes from team
+  // assignments rather than ownership.
   const clients = await User.findAll({
-    where: { parentId: parentUserId, kind: 'account' }, // exclude team-member logins
+    where: { parentId: parentUserId },
     attributes: { exclude: ['password'] },
     include: [{ model: UserMeta, as: 'meta', required: false }],
     order: [['created_at', 'DESC']],
@@ -142,7 +167,7 @@ const listClients = async (parentUserId) => {
 
   const ids = clients.map(c => c.id);
 
-  // Batch: vehicle count per client
+  // Batch: owned-vehicle count per ACCOUNT client (ownership).
   const vcRows = await Vehicle.findAll({
     where: { clientId: ids },
     attributes: ['clientId', [fn('COUNT', col('id')), 'cnt']],
@@ -151,18 +176,21 @@ const listClients = async (parentUserId) => {
   });
   const vcMap = Object.fromEntries(vcRows.map(r => [r.clientId, Number(r.cnt)]));
 
-  // Batch: sub-client count per client
+  // Batch: sub-client count per client (members never have sub-clients).
   const scRows = await User.findAll({
-    where: { parentId: ids, kind: 'account' }, // exclude team-member logins from sub-client counts
+    where: { parentId: ids, kind: 'account' },
     attributes: ['parentId', [fn('COUNT', col('id')), 'cnt']],
     group: ['parentId'],
     raw: true,
   });
   const scMap = Object.fromEntries(scRows.map(r => [r.parentId, Number(r.cnt)]));
 
+  // Batch: assigned-vehicle count per MEMBER (distinct vehicles across their teams).
+  const memberVcMap = await _memberVehicleCounts(clients.filter(c => c.kind === 'member').map(c => c.id));
+
   return clients.map(c => ({
     ...c.toJSON(),
-    vehicleCount: vcMap[c.id] || 0,
+    vehicleCount: c.kind === 'member' ? (memberVcMap[c.id] || 0) : (vcMap[c.id] || 0),
     subClientCount: scMap[c.id] || 0,
   }));
 };
@@ -259,17 +287,19 @@ const buildClientTree = async (parentId, depth = 0) => {
     raw: true,
   });
   const vcMap = Object.fromEntries(vcRows.map(r => [r.clientId, Number(r.cnt)]));
+  const memberVcMap = await _memberVehicleCounts(clients.filter(c => c.kind === 'member').map(c => c.id));
 
   // Recursively build children for each client in parallel
   const result = await Promise.all(
     clients.map(async (c) => {
       const children = await buildClientTree(c.id, depth + 1);
-      // Aggregate total vehicles across entire sub-tree
-      const networkVehicleCount = (vcMap[c.id] || 0) +
+      // Members' count comes from team assignments, accounts' from ownership.
+      const ownCount = c.kind === 'member' ? (memberVcMap[c.id] || 0) : (vcMap[c.id] || 0);
+      const networkVehicleCount = ownCount +
         children.reduce((s, ch) => s + (ch.networkVehicleCount || 0), 0);
       return {
         ...c.toJSON(),
-        vehicleCount: vcMap[c.id] || 0,
+        vehicleCount: ownCount,
         networkVehicleCount,
         children,
       };
