@@ -38,6 +38,11 @@ function _request(method, path, body, headers = {}, timeoutMs = 8_000) {
         ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
         ...headers,
       },
+      // The SmartChallan endpoint is an INTERNAL service reached by private IP
+      // (e.g. https://10.87.213.171:4001) whose TLS cert has no matching SAN, so
+      // Node rejects it with "IP is not in the cert's altnames". Skip cert
+      // verification for this private host — it is not a public MITM surface.
+      ...(SC_PROTOCOL === 'https' ? { rejectUnauthorized: false } : {}),
     };
     console.log(`[SC] → ${method} ${SC_PROTOCOL}://${SC_BASE_HOST}:${SC_BASE_PORT}${path}`);
     const transport = SC_PROTOCOL === 'https' ? https : http;
