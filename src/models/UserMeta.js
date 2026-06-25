@@ -49,6 +49,31 @@ const UserMeta = sequelize.define(
       type: DataTypes.STRING(100),
       allowNull: true,
     },
+
+    // ── Billing / tax-invoice identity (used on printed invoices) ──────────
+    gstin: {
+      type: DataTypes.STRING(20),
+      allowNull: true,
+      comment: 'GST registration number shown on tax invoices',
+    },
+    invoiceTaxPercent: {
+      type: DataTypes.DECIMAL(5, 2),
+      allowNull: true,
+      field: 'invoice_tax_percent',
+      comment: 'Default GST % this user applies when issuing invoices (null = use system default)',
+    },
+    invoicePrefix: {
+      type: DataTypes.STRING(12),
+      allowNull: true,
+      field: 'invoice_prefix',
+      comment: 'Prefix for invoice numbers e.g. "INV" → INV-2026-000123',
+    },
+    logoUrl: {
+      type: DataTypes.STRING(500),
+      allowNull: true,
+      field: 'logo_url',
+      comment: 'Company logo URL for invoice letterhead',
+    },
   },
   {
     tableName: 'di_user_meta',

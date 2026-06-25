@@ -30,6 +30,7 @@ const UserPermission = sequelize.define(
     canViewChallans: { type: DataTypes.BOOLEAN, defaultValue: false },
     canViewNotifications: { type: DataTypes.BOOLEAN, defaultValue: false },
     canManageTeams: { type: DataTypes.BOOLEAN, defaultValue: false },
+    canManageBilling: { type: DataTypes.BOOLEAN, defaultValue: false },
   },
   {
     tableName: 'di_user_permissions',

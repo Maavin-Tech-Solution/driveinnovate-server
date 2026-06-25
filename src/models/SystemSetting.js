@@ -18,6 +18,15 @@ const SystemSetting = sequelize.define('SystemSetting', {
 
   /** How many days a newly created trial account is valid (default 30) */
   trialDurationDays: { type: DataTypes.INTEGER, defaultValue: 30, allowNull: false },
+
+  /** Master switch — when false the prepaid billing module is hidden/disabled */
+  billingEnabled: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
+
+  /** Network-wide fallback monthly price (coins/₹) per vehicle when a client has no explicit BillingRate */
+  defaultMonthlyPrice: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0, allowNull: false },
+
+  /** Default GST/tax % applied to invoices when an issuer has not set their own */
+  defaultTaxPercent: { type: DataTypes.DECIMAL(5, 2), defaultValue: 0, allowNull: false },
 }, {
   tableName: 'system_settings',
   timestamps: true,

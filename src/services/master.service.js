@@ -340,6 +340,9 @@ const DEFAULT_SETTINGS = {
   liveShareEnabled:    false,
   trialAccountEnabled: false,
   trialDurationDays:   30,
+  billingEnabled:      false,
+  defaultMonthlyPrice: 0,
+  defaultTaxPercent:   0,
 };
 
 /**
@@ -354,6 +357,9 @@ const getSystemSettings = async () => {
     liveShareEnabled:    Boolean(row.liveShareEnabled),
     trialAccountEnabled: Boolean(row.trialAccountEnabled),
     trialDurationDays:   Number(row.trialDurationDays) || 30,
+    billingEnabled:      Boolean(row.billingEnabled),
+    defaultMonthlyPrice: Number(row.defaultMonthlyPrice) || 0,
+    defaultTaxPercent:   Number(row.defaultTaxPercent) || 0,
   };
 };
 
@@ -362,8 +368,9 @@ const getSystemSettings = async () => {
  * @param {object} updates – e.g. { liveShareEnabled: true, trialDurationDays: 14 }
  */
 const updateSystemSettings = async (updates) => {
-  const boolKeys = ['liveShareEnabled', 'trialAccountEnabled'];
+  const boolKeys = ['liveShareEnabled', 'trialAccountEnabled', 'billingEnabled'];
   const intKeys  = ['trialDurationDays'];
+  const decimalKeys = ['defaultMonthlyPrice', 'defaultTaxPercent'];
   const safe = {};
   for (const k of boolKeys) {
     if (k in updates) safe[k] = Boolean(updates[k]);
@@ -372,6 +379,12 @@ const updateSystemSettings = async (updates) => {
     if (k in updates) {
       const v = parseInt(updates[k], 10);
       if (!isNaN(v) && v > 0) safe[k] = v;
+    }
+  }
+  for (const k of decimalKeys) {
+    if (k in updates) {
+      const v = Number(updates[k]);
+      if (!isNaN(v) && v >= 0) safe[k] = v;
     }
   }
   await SystemSetting.upsert({ id: 1, ...safe });

@@ -882,7 +882,7 @@ const getVehicleById = async (id, callerClientIds) => {
   return await attachGpsData(vehicle);
 };
 
-const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, branch, deviceName, deviceType, serverIp, serverPort, vehicleIcon, fuelSupported, fuelTankCapacity }) => {
+const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, branch, deviceName, deviceType, serverIp, serverPort, vehicleIcon, fuelSupported, fuelTankCapacity }, opts = {}) => {
   if (vehicleNumber) {
     const existing = await Vehicle.findOne({ where: { vehicleNumber: vehicleNumber.toUpperCase() } });
     if (existing) {
@@ -896,7 +896,7 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
   // If user has a parent, use that; otherwise use the user's own ID (they are the parent)
   const parentId = user?.parentId || clientId;
 
-  return Vehicle.create({
+  const fields = {
     clientId,
     parentId,
     vehicleNumber: vehicleNumber ? vehicleNumber.toUpperCase() : null,
@@ -914,7 +914,27 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
     vehicleIcon: vehicleIcon || 'car',
     fuelSupported: !!fuelSupported,
     fuelTankCapacity: fuelTankCapacity ? parseInt(fuelTankCapacity, 10) : null,
-  });
+  };
+
+  // Prepaid token billing: when enabled, spend 1 vehicle token and set billed-till
+  // to +1 year in the SAME transaction as the insert — so an empty wallet leaves
+  // no orphan vehicle behind, and a created vehicle always has a token backing it.
+  const { actor, consumeToken } = opts;
+  if (consumeToken) {
+    const billingService = require('./billing.service');
+    return sequelize.transaction(async (t) => {
+      const vehicle = await Vehicle.create(fields, { transaction: t });
+      const result = await billingService.activateOrRenew({
+        actor, vehicle, type: 'ACTIVATION', transaction: t,
+      });
+      // Surface billing outcome to the caller without an extra query.
+      vehicle.setDataValue('tokenBalance', result.balanceAfter);
+      vehicle.setDataValue('subscriptionExpiresAt', result.periodEnd);
+      return vehicle;
+    });
+  }
+
+  return Vehicle.create(fields);
 };
 
 const updateVehicle = async (id, clientId, data, callerClientIds, actor = {}) => {

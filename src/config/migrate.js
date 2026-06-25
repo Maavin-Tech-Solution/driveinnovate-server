@@ -82,6 +82,23 @@ const MIGRATIONS = [
   // camelCase column names directly (trialAccountEnabled, trialDurationDays).
   { table: 'system_settings', column: 'trialAccountEnabled', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Master switch for trial account expiry enforcement"' },
   { table: 'system_settings', column: 'trialDurationDays',   ddl: 'INT NOT NULL DEFAULT 30 COMMENT "Default trial period in days for new accounts"' },
+
+  // ── Billing module: system_settings (camelCase — SystemSetting has no underscored) ──
+  { table: 'system_settings', column: 'billingEnabled',      ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Master switch for the prepaid billing module"' },
+  { table: 'system_settings', column: 'defaultMonthlyPrice', ddl: 'DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT "Network fallback per-vehicle monthly price (coins/₹)"' },
+  { table: 'system_settings', column: 'defaultTaxPercent',   ddl: 'DECIMAL(5,2) NOT NULL DEFAULT 0 COMMENT "Default GST/tax % on invoices"' },
+
+  // ── Billing module: di_user_meta (GST + invoice branding) ──────────────────
+  { table: 'di_user_meta', column: 'gstin',                ddl: 'VARCHAR(20) NULL COMMENT "GST registration number on tax invoices"' },
+  { table: 'di_user_meta', column: 'invoice_tax_percent',  ddl: 'DECIMAL(5,2) NULL COMMENT "Default GST % this issuer applies (null = system default)"' },
+  { table: 'di_user_meta', column: 'invoice_prefix',       ddl: 'VARCHAR(12) NULL COMMENT "Invoice number prefix e.g. INV"' },
+  { table: 'di_user_meta', column: 'logo_url',             ddl: 'VARCHAR(500) NULL COMMENT "Company logo URL for invoice letterhead"' },
+
+  // ── Billing module: di_user_permissions ────────────────────────────────────
+  { table: 'di_user_permissions', column: 'can_manage_billing', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Can manage wallets, rates, and issue/renew bills"' },
+
+  // ── Billing module: di_invoice (token model — vehicle_count added later) ────
+  { table: 'di_invoice', column: 'vehicle_count', ddl: 'INT NULL COMMENT "Vehicle tokens sold on a RECHARGE invoice"' },
 ];
 
 /**
@@ -105,6 +122,20 @@ const ENUM_PATCHES = [
     mustContain:  'FUEL_THEFT',
     fullDdl:      "ENUM('SPEED_EXCEEDED','NOT_MOVING','IDLE_ENGINE','FUEL_THEFT') NOT NULL",
   },
+  // Token billing model: invoices are now primarily RECHARGE (token sales).
+  {
+    table:        'di_invoice',
+    column:       'type',
+    mustContain:  'RECHARGE',
+    fullDdl:      "ENUM('RECHARGE','ACTIVATION','RENEWAL') NOT NULL",
+  },
+];
+
+// Columns that must become NULLABLE on existing tables (the token model no longer
+// ties an invoice to one vehicle period). Safe to run every start.
+const NULLABLE_PATCHES = [
+  { table: 'di_invoice', column: 'period_start', ddl: 'DATETIME NULL' },
+  { table: 'di_invoice', column: 'period_end',   ddl: 'DATETIME NULL COMMENT "Billed-till date (ACTIVATION/RENEWAL vouchers only)"' },
 ];
 
 async function runMigrations() {
@@ -135,6 +166,21 @@ async function runMigrations() {
     if (row && !row.COLUMN_TYPE.includes(mustContain)) {
       await sequelize.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${column}\` ${fullDdl}`);
       console.log(`[migrate] ✓ Patched ENUM ${table}.${column} → added '${mustContain}'`);
+      added++;
+    }
+  }
+
+  // Relax NOT NULL → NULL on existing columns (only when the column exists and is
+  // currently NOT NULL). Skipped entirely on a fresh DB where sync already made it nullable.
+  for (const { table, column, ddl } of NULLABLE_PATCHES) {
+    const [[row]] = await sequelize.query(
+      `SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :table AND COLUMN_NAME = :column`,
+      { replacements: { db, table, column } }
+    );
+    if (row && row.IS_NULLABLE === 'NO') {
+      await sequelize.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${column}\` ${ddl}`);
+      console.log(`[migrate] ✓ Relaxed ${table}.${column} → NULLABLE`);
       added++;
     }
   }

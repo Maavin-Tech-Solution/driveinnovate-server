@@ -1,5 +1,6 @@
 const vehicleService = require('../services/vehicle.service');
 const { buildVehicleScope } = require('../utils/vehicleScope');
+const { getSystemSettings } = require('../services/master.service');
 
 /**
  * GET /api/vehicles
@@ -59,14 +60,21 @@ const addVehicle = async (req, res) => {
       effectiveClientId = targetId;
     }
 
-    const vehicle = await vehicleService.addVehicle(effectiveClientId, {
-      vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, branch,
-      deviceName, deviceType, serverIp, serverPort, vehicleIcon,
-      fuelSupported, fuelTankCapacity,
-    });
+    // When prepaid billing is enabled network-wide, every vehicle add spends 1
+    // token (enforced server-side, can't be bypassed by the client).
+    const { billingEnabled } = await getSystemSettings();
+    const vehicle = await vehicleService.addVehicle(
+      effectiveClientId,
+      {
+        vehicleNumber, vehicleName, chasisNumber, engineNumber, imei, sim1, sim2, branch,
+        deviceName, deviceType, serverIp, serverPort, vehicleIcon,
+        fuelSupported, fuelTankCapacity,
+      },
+      billingEnabled ? { actor: req.user, consumeToken: true } : {},
+    );
     return res.status(201).json({ success: true, message: 'Vehicle registered successfully', data: vehicle });
   } catch (err) {
-    return res.status(err.status || 500).json({ success: false, message: err.message });
+    return res.status(err.status || 500).json({ success: false, message: err.message, code: err.code, details: err.details });
   }
 };
 

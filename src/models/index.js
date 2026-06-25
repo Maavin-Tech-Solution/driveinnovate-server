@@ -32,6 +32,11 @@ const VehicleEditHistory = require('./VehicleEditHistory');
 const Team = require('./Team');
 const TeamVehicle = require('./TeamVehicle');
 const TeamMember = require('./TeamMember');
+const Wallet = require('./Wallet');
+const WalletTransaction = require('./WalletTransaction');
+const BillingRate = require('./BillingRate');
+const Invoice = require('./Invoice');
+const InvoiceCounter = require('./InvoiceCounter');
 
 // Associations
 User.hasOne(UserMeta, { foreignKey: 'userId', as: 'meta' });
@@ -161,6 +166,25 @@ Team.hasMany(TeamMember, { foreignKey: 'teamId', as: 'teamMembers' });
 TeamMember.belongsTo(Team, { foreignKey: 'teamId', as: 'team' });
 TeamMember.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
+// ── Billing: wallets, ledger, rates, invoices ───────────────────────────────
+User.hasOne(Wallet, { foreignKey: 'userId', as: 'wallet' });
+Wallet.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+Wallet.hasMany(WalletTransaction, { foreignKey: 'walletId', as: 'transactions' });
+WalletTransaction.belongsTo(Wallet, { foreignKey: 'walletId', as: 'wallet' });
+WalletTransaction.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
+WalletTransaction.belongsTo(User, { foreignKey: 'counterpartyUserId', as: 'counterparty' });
+
+User.hasOne(BillingRate, { foreignKey: 'clientId', as: 'billingRate' });
+BillingRate.belongsTo(User, { foreignKey: 'clientId', as: 'client' });
+
+User.hasMany(Invoice, { foreignKey: 'clientId', as: 'invoices' });
+Invoice.belongsTo(User, { foreignKey: 'clientId', as: 'client' });
+Invoice.belongsTo(User, { foreignKey: 'issuedByUserId', as: 'issuer' });
+Invoice.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+Vehicle.hasMany(Invoice, { foreignKey: 'vehicleId', as: 'invoices' });
+Invoice.belongsTo(WalletTransaction, { foreignKey: 'walletTransactionId', as: 'walletTransaction' });
+
 module.exports = {
   UserSettings,
   sequelize,
@@ -196,4 +220,9 @@ module.exports = {
   Team,
   TeamVehicle,
   TeamMember,
+  Wallet,
+  WalletTransaction,
+  BillingRate,
+  Invoice,
+  InvoiceCounter,
 };

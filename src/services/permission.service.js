@@ -17,6 +17,7 @@ const PERMISSION_KEYS = [
   'canViewChallans',
   'canViewNotifications',
   'canManageTeams',
+  'canManageBilling',
 ];
 
 const ALL_TRUE = Object.fromEntries(PERMISSION_KEYS.map(k => [k, true]));
