@@ -493,10 +493,9 @@ async function processPacketInner(doc, deviceType, _state) {
         if (state.currentSessionId) {
           const sess = await VehicleEngineSession.findByPk(state.currentSessionId);
           if (sess && sess.status === 'active') {
-            const dur = Math.max(0, Math.floor(
-              (new Date(state.lastGpsPacketTime).getTime() - new Date(sess.startTime).getTime()) / 1000
-            ));
-            await sess.update({ endTime: new Date(state.lastGpsPacketTime), durationSeconds: dur, status: 'completed' });
+            const sessEnd = Math.max(new Date(state.lastGpsPacketTime).getTime(), new Date(sess.startTime).getTime());
+            const dur = Math.max(0, Math.floor((sessEnd - new Date(sess.startTime).getTime()) / 1000));
+            await sess.update({ endTime: new Date(sessEnd), durationSeconds: dur, status: 'completed' });
           }
           state.currentSessionId = null;
         }
@@ -551,7 +550,10 @@ async function processPacketInner(doc, deviceType, _state) {
     }
 
     // ── Engine session tracking ────────────────────────────────────────────────
-    if (ignitionOn && !prevIgnition) {
+    // Out-of-order/replayed packets must not open or close sessions (same class of
+    // corruption that produced garbage trips). The accumulate branch is already a
+    // no-op for OOO (segKm/segSecs = 0).
+    if (!isOutOfOrder && ignitionOn && !prevIgnition) {
       // Engine just turned ON — open a new session
       const session = await VehicleEngineSession.create({
         vehicleId, imei: pkt.imei,
@@ -565,15 +567,17 @@ async function processPacketInner(doc, deviceType, _state) {
       state.currentSessionId = session.id;
       state.engineOnSince    = pkt.timestamp;
 
-    } else if (!ignitionOn && prevIgnition && state.currentSessionId) {
+    } else if (!isOutOfOrder && !ignitionOn && prevIgnition && state.currentSessionId) {
       // Engine just turned OFF — close the active session
       const session = await VehicleEngineSession.findByPk(state.currentSessionId);
       if (session && session.status === 'active') {
-        const durationSec  = Math.max(0, Math.floor((now - new Date(session.startTime).getTime()) / 1000));
+        // Never let the session end before its own start.
+        const sessEnd = Math.max(now, new Date(session.startTime).getTime());
+        const durationSec  = Math.max(0, Math.floor((sessEnd - new Date(session.startTime).getTime()) / 1000));
         const fuelConsumed = (session.startFuelLevel !== null && pkt.fuel !== null)
           ? Math.max(0, session.startFuelLevel - pkt.fuel) : 0;
         await session.update({
-          endTime: pkt.timestamp,
+          endTime: new Date(sessEnd),
           durationSeconds: durationSec,
           endLatitude: pkt.lat, endLongitude: pkt.lng,
           endFuelLevel: pkt.fuel,

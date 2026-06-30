@@ -1,6 +1,7 @@
 const vehicleService = require('../services/vehicle.service');
 const { buildVehicleScope } = require('../utils/vehicleScope');
 const { getSystemSettings } = require('../services/master.service');
+const { User } = require('../models');
 
 /**
  * GET /api/vehicles
@@ -44,6 +45,7 @@ const addVehicle = async (req, res) => {
       deviceName, deviceType, serverIp, serverPort, vehicleIcon,
       fuelSupported, fuelTankCapacity,
       forClientId,
+      tokenType,
     } = req.body;
 
     if (!vehicleNumber && !chasisNumber && !engineNumber && !imei) {
@@ -60,9 +62,14 @@ const addVehicle = async (req, res) => {
       effectiveClientId = targetId;
     }
 
-    // When prepaid billing is enabled network-wide, every vehicle add spends 1
-    // token (enforced server-side, can't be bypassed by the client).
+    // A vehicle add spends 1 token ONLY when the module is enabled network-wide
+    // AND the owning client is on prepaid billing (enforced server-side).
     const { billingEnabled } = await getSystemSettings();
+    let consumeToken = false;
+    if (billingEnabled) {
+      const owner = await User.findByPk(effectiveClientId, { attributes: ['billingType'] });
+      consumeToken = owner?.billingType === 'prepaid';
+    }
     const vehicle = await vehicleService.addVehicle(
       effectiveClientId,
       {
@@ -70,7 +77,7 @@ const addVehicle = async (req, res) => {
         deviceName, deviceType, serverIp, serverPort, vehicleIcon,
         fuelSupported, fuelTankCapacity,
       },
-      billingEnabled ? { actor: req.user, consumeToken: true } : {},
+      consumeToken ? { actor: req.user, consumeToken: true, tokenType } : {},
     );
     return res.status(201).json({ success: true, message: 'Vehicle registered successfully', data: vehicle });
   } catch (err) {

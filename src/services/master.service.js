@@ -343,6 +343,8 @@ const DEFAULT_SETTINGS = {
   billingEnabled:      false,
   defaultMonthlyPrice: 0,
   defaultTaxPercent:   0,
+  testPeriodDays:      30,
+  gracePeriodDays:     15,
 };
 
 /**
@@ -360,6 +362,8 @@ const getSystemSettings = async () => {
     billingEnabled:      Boolean(row.billingEnabled),
     defaultMonthlyPrice: Number(row.defaultMonthlyPrice) || 0,
     defaultTaxPercent:   Number(row.defaultTaxPercent) || 0,
+    testPeriodDays:      Number(row.testPeriodDays) || 30,
+    gracePeriodDays:     Number(row.gracePeriodDays) || 15,
   };
 };
 
@@ -369,7 +373,7 @@ const getSystemSettings = async () => {
  */
 const updateSystemSettings = async (updates) => {
   const boolKeys = ['liveShareEnabled', 'trialAccountEnabled', 'billingEnabled'];
-  const intKeys  = ['trialDurationDays'];
+  const intKeys  = ['trialDurationDays', 'testPeriodDays', 'gracePeriodDays'];
   const decimalKeys = ['defaultMonthlyPrice', 'defaultTaxPercent'];
   const safe = {};
   for (const k of boolKeys) {

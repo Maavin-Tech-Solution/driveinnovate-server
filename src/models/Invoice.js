@@ -38,6 +38,21 @@ const Invoice = sequelize.define(
       defaultValue: 'PAID',
     },
 
+    // Nature of the tokens sold. TESTING/GRACE recharges are free (zeroed money)
+    // and accountable=false so they are excluded from revenue reporting.
+    tokenType: {
+      type: DataTypes.ENUM('PAID', 'TESTING', 'GRACE'),
+      allowNull: false,
+      defaultValue: 'PAID',
+      field: 'token_type',
+    },
+    accountable: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+      comment: 'false for TESTING/GRACE grants — excluded from revenue/accounting',
+    },
+
     // ── Parties ────────────────────────────────────────────────────────────
     clientId:     { type: DataTypes.INTEGER, allowNull: false, field: 'client_id',      comment: 'Billed party — the recipient/buyer of the tokens' },
     issuedByUserId:{ type: DataTypes.INTEGER, allowNull: false, field: 'issued_by_user_id', comment: 'Seller — the parent who issued the tokens' },

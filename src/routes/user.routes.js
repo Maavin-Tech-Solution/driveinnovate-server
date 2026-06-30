@@ -36,4 +36,7 @@ router.post('/clients/:clientId/upgrade', validateConsumer, userController.upgra
 // POST /api/users/clients/:clientId/extend-trial - extend trial expiry (papa/dealer)
 router.post('/clients/:clientId/extend-trial', validateConsumer, userController.extendClientTrial);
 
+// PUT /api/users/clients/:clientId/billing-type - switch prepaid/postpaid
+router.put('/clients/:clientId/billing-type', validateConsumer, userController.setClientBillingType);
+
 module.exports = router;

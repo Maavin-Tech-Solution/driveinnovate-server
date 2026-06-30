@@ -75,7 +75,7 @@ const updateNotifications = async (userId, { emailNotifications, smsNotification
 
 const createClient = async (
   parentUserId,
-  { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType }
+  { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType, billingType }
 ) => {
   const existing = await User.findOne({ where: { email } });
   if (existing) {
@@ -103,6 +103,7 @@ const createClient = async (
       password: hashedPassword,
       accountType: resolvedType,
       trialExpiresAt,
+      billingType: billingType === 'prepaid' ? 'prepaid' : 'postpaid',
     });
   } catch (e) {
     if (e instanceof UniqueConstraintError) {
@@ -389,6 +390,20 @@ const extendTrial = async (clientId, callerClientIds, newExpiresAt) => {
   return { accountType: 'trial', trialExpiresAt: expiry };
 };
 
+/** Switch a client between prepaid (wallet tokens) and postpaid billing. */
+const setBillingType = async (clientId, callerClientIds, billingType) => {
+  if (!['prepaid', 'postpaid'].includes(billingType)) {
+    const err = new Error('billingType must be prepaid or postpaid'); err.status = 400; throw err;
+  }
+  if (callerClientIds?.length && !callerClientIds.includes(Number(clientId))) {
+    const err = new Error('You do not have access to this client.'); err.status = 403; throw err;
+  }
+  const client = await User.findByPk(clientId);
+  if (!client) { const err = new Error('Client not found'); err.status = 404; throw err; }
+  await client.update({ billingType });
+  return { id: client.id, billingType: client.billingType };
+};
+
 module.exports = {
   getProfile,
   getParentContact,
@@ -401,4 +416,5 @@ module.exports = {
   buildClientTree,
   upgradeToBillable,
   extendTrial,
+  setBillingType,
 };

@@ -27,11 +27,27 @@ const Wallet = sequelize.define(
       comment: 'Owner of this wallet (di_user.id)',
     },
 
+    // Total spendable tokens = balancePaid + balanceTesting + balanceGrace.
+    // Kept as a denormalised sum for quick display; the per-type columns are the
+    // source of truth (a vehicle spends ONE specific type, and the duration it
+    // grants depends on that type).
     balance: {
       type: DataTypes.DECIMAL(14, 2),
       allowNull: false,
       defaultValue: 0,
-      comment: 'Current spendable coins (1 coin = ₹1). Never goes negative.',
+      comment: 'Total vehicle tokens across all types (sum of the per-type balances).',
+    },
+    balancePaid: {
+      type: DataTypes.INTEGER, allowNull: false, defaultValue: 0, field: 'balance_paid',
+      comment: 'Paid (billable) tokens — each grants 1 year + grace buffer',
+    },
+    balanceTesting: {
+      type: DataTypes.INTEGER, allowNull: false, defaultValue: 0, field: 'balance_testing',
+      comment: 'Testing tokens — each grants the network test period (days)',
+    },
+    balanceGrace: {
+      type: DataTypes.INTEGER, allowNull: false, defaultValue: 0, field: 'balance_grace',
+      comment: 'Grace/complimentary tokens — each grants the network grace period (days)',
     },
 
     status: {

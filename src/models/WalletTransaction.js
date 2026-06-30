@@ -34,6 +34,16 @@ const WalletTransaction = sequelize.define(
       comment: 'MINT=papa creates coins, CREDIT=received, DEBIT=spent/sent, ADJUSTMENT/REVERSAL=corrections',
     },
 
+    // PAID = real/billable. TESTING/GRACE = free tokens that must NOT count as
+    // revenue. The token's nature follows it through the ledger.
+    tokenType: {
+      type: DataTypes.ENUM('PAID', 'TESTING', 'GRACE'),
+      allowNull: false,
+      defaultValue: 'PAID',
+      field: 'token_type',
+      comment: 'PAID=billable, TESTING=trial (free), GRACE=goodwill (free)',
+    },
+
     refType: {
       type: DataTypes.ENUM('MINT', 'TRANSFER', 'VEHICLE_ACTIVATION', 'VEHICLE_RENEWAL', 'MANUAL_ADJUST', 'REVERSAL'),
       allowNull: false,

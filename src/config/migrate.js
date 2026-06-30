@@ -51,6 +51,7 @@ const MIGRATIONS = [
   { table: 'di_user', column: 'account_type',    ddl: "ENUM('trial','billable','demo','master') NOT NULL DEFAULT 'trial' COMMENT \"Account subscription type\"" },
   { table: 'di_user', column: 'trial_expires_at', ddl: 'DATETIME NULL COMMENT "Trial expiry timestamp; NULL = no expiry enforced"' },
   { table: 'di_user', column: 'kind',             ddl: "ENUM('account','member') NOT NULL DEFAULT 'account' COMMENT \"account=papa/dealer/client hierarchy user; member=restricted team-member login\"" },
+  { table: 'di_user', column: 'billing_type',     ddl: "ENUM('prepaid','postpaid') NOT NULL DEFAULT 'postpaid' COMMENT \"prepaid=wallet-token billing; postpaid=billed outside the module\"" },
 
   // ── di_user_permissions (Teams feature) ───────────────────────────────────
   { table: 'di_user_permissions', column: 'can_manage_teams', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Can create/manage teams and team members"' },
@@ -99,6 +100,23 @@ const MIGRATIONS = [
 
   // ── Billing module: di_invoice (token model — vehicle_count added later) ────
   { table: 'di_invoice', column: 'vehicle_count', ddl: 'INT NULL COMMENT "Vehicle tokens sold on a RECHARGE invoice"' },
+  { table: 'di_invoice', column: 'token_type',    ddl: "ENUM('PAID','TESTING','GRACE') NOT NULL DEFAULT 'PAID' COMMENT \"Nature of tokens sold\"" },
+  { table: 'di_invoice', column: 'accountable',   ddl: 'TINYINT(1) NOT NULL DEFAULT 1 COMMENT "false for free TESTING/GRACE grants"' },
+
+  // ── Billing lifecycle: token type on ledger + grace + per-vehicle expiry ────
+  { table: 'di_wallet_transaction', column: 'token_type', ddl: "ENUM('PAID','TESTING','GRACE') NOT NULL DEFAULT 'PAID' COMMENT \"PAID=billable, TESTING/GRACE=free\"" },
+  { table: 'di_billing_rate',       column: 'grace_days', ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Extra days beyond the 1-year term for this client"' },
+  { table: 'di_user_vehicle',       column: 'grace_expires_at',        ddl: 'DATETIME NULL COMMENT "Actual expiry + grace days; auto-inactivated after this"' },
+  { table: 'di_user_vehicle',       column: 'expiry_reminder_sent_at', ddl: 'DATETIME NULL COMMENT "When the pre-expiry reminder was last sent (reset on renew)"' },
+
+  // ── Per-type token balances on the wallet ──────────────────────────────────
+  { table: 'di_wallet', column: 'balance_paid',    ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Paid (billable) tokens"' },
+  { table: 'di_wallet', column: 'balance_testing', ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Testing tokens"' },
+  { table: 'di_wallet', column: 'balance_grace',   ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Grace/complimentary tokens"' },
+
+  // ── Token validity durations by type (camelCase — SystemSetting not underscored) ──
+  { table: 'system_settings', column: 'testPeriodDays',  ddl: 'INT NOT NULL DEFAULT 30 COMMENT "Vehicle validity days granted by a TESTING token"' },
+  { table: 'system_settings', column: 'gracePeriodDays', ddl: 'INT NOT NULL DEFAULT 15 COMMENT "Vehicle validity days granted by a GRACE token"' },
 ];
 
 /**
@@ -184,6 +202,23 @@ async function runMigrations() {
       added++;
     }
   }
+
+  // One-time backfill: pre-split wallets had a single `balance` (all PAID). Move it
+  // into balance_paid. Guarded so it only touches rows that were never split
+  // (all three per-type columns still 0 while balance > 0).
+  try {
+    const [[col]] = await sequelize.query(
+      `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'di_wallet' AND COLUMN_NAME = 'balance_paid'`,
+      { replacements: { db } }
+    );
+    if (col) {
+      const [res] = await sequelize.query(
+        `UPDATE di_wallet SET balance_paid = balance
+           WHERE balance > 0 AND balance_paid = 0 AND balance_testing = 0 AND balance_grace = 0`
+      );
+      if (res?.affectedRows) console.log(`[migrate] ✓ Backfilled balance_paid for ${res.affectedRows} wallet(s)`);
+    }
+  } catch (e) { console.warn('[migrate] wallet backfill skipped:', e.message); }
 
   if (added === 0) {
     console.log('[migrate] All columns up to date — nothing to add');

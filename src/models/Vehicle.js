@@ -117,7 +117,19 @@ const Vehicle = sequelize.define(
     subscriptionExpiresAt: {
       type: DataTypes.DATE,
       allowNull: true,
-      comment: 'Set when client upgrades to billable; null = no per-vehicle expiry tracked',
+      comment: 'ACTUAL paid expiry (activation/renewal + 1 year). null = not on a paid subscription',
+    },
+    graceExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      field: 'grace_expires_at',
+      comment: 'subscriptionExpiresAt + client grace days. Vehicle stays usable until this; then auto-inactivated',
+    },
+    expiryReminderSentAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      field: 'expiry_reminder_sent_at',
+      comment: 'When the pre-expiry reminder was last sent for the current term (reset on renew)',
     },
   },
   {

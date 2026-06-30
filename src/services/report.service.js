@@ -1193,12 +1193,18 @@ class ReportService {
         };
       }
 
-      // Get trip durations (running hours)
+      // Engine-on time = driving (speed > 0) + idle (engine ON, speed 0), taken
+      // from each trip's recorded breakdown. Trip `duration` is total wall-clock
+      // and ALSO includes engine-OFF stoppages within the trip, so it must NOT be
+      // used as engine time (the old code did, AND double-added separate idle
+      // stops on top → inflated/incorrect engine hours).
       const tripStats = await Trip.findAll({
         where,
         attributes: [
           'vehicleId',
-          [Trip.sequelize.fn('SUM', Trip.sequelize.col('duration')), 'runningTime']
+          [Trip.sequelize.fn('SUM', Trip.sequelize.col('driving_time_seconds')), 'drivingTime'],
+          [Trip.sequelize.fn('SUM', Trip.sequelize.col('engine_idle_seconds')),  'idleTime'],
+          [Trip.sequelize.fn('SUM', Trip.sequelize.col('duration')),             'totalDuration'],
         ],
         include: [{
           model: Vehicle,
@@ -1209,34 +1215,24 @@ class ReportService {
         raw: true
       });
 
-      // Get idle durations
-      const idleStats = await Stop.findAll({
-        where: { ...where, stopType: 'IDLE' },
-        attributes: [
-          'vehicleId',
-          [Stop.sequelize.fn('SUM', Stop.sequelize.col('duration')), 'idleTime']
-        ],
-        group: ['vehicleId'],
-        raw: true
-      });
-
-      const idleMap = {};
-      idleStats.forEach(stat => {
-        idleMap[stat.vehicleId] = parseInt(stat.idleTime || 0);
-      });
-
       const engineHours = tripStats.map(stat => {
-        const runningTime = parseInt(stat.runningTime || 0);
-        const idleTime = idleMap[stat.vehicleId] || 0;
-        const totalEngineTime = runningTime + idleTime;
+        let running = parseInt(stat.drivingTime || 0);
+        let idle    = parseInt(stat.idleTime || 0);
+        let totalEngineTime = running + idle;
+        // Legacy trips with no recorded breakdown → fall back to wall-clock duration.
+        if (totalEngineTime === 0) {
+          totalEngineTime = parseInt(stat.totalDuration || 0);
+          running = totalEngineTime;
+          idle = 0;
+        }
 
         return {
           vehicleId: stat.vehicleId,
           vehicleNumber: stat['vehicle.vehicleNumber'],
-          runningHours: parseFloat((runningTime / 3600).toFixed(2)),
-          idleHours: parseFloat((idleTime / 3600).toFixed(2)),
+          runningHours: parseFloat((running / 3600).toFixed(2)),
+          idleHours: parseFloat((idle / 3600).toFixed(2)),
           totalEngineHours: parseFloat((totalEngineTime / 3600).toFixed(2)),
-          idlePercentage: totalEngineTime > 0 ? parseFloat(((idleTime / totalEngineTime) * 100).toFixed(2)) : 0
+          idlePercentage: totalEngineTime > 0 ? parseFloat(((idle / totalEngineTime) * 100).toFixed(2)) : 0
         };
       });
 

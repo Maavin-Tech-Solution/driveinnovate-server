@@ -55,6 +55,15 @@ const User = sequelize.define(
       allowNull: false,
       defaultValue: 'account',
     },
+    // prepaid = vehicles are paid for with wallet tokens (the billing module).
+    // postpaid = billed outside the token system. Existing accounts default to
+    // postpaid so enabling the module doesn't retroactively gate anyone.
+    billingType: {
+      type: DataTypes.ENUM('prepaid', 'postpaid'),
+      allowNull: false,
+      defaultValue: 'postpaid',
+      field: 'billing_type',
+    },
     // SmartChallan integration
     scEnabled:        { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_enabled' },
     scUsername:       { type: DataTypes.STRING(255), allowNull: true, field: 'sc_username' },

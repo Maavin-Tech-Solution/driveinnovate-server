@@ -87,7 +87,7 @@ const createClient = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You do not have permission to add clients.' });
     }
 
-    const { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType } = req.body;
+    const { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType, billingType } = req.body;
     if (!name || !email || !phone || !password) {
       return res.status(400).json({ success: false, message: 'name, email, phone and password are required' });
     }
@@ -99,6 +99,10 @@ const createClient = async (req, res) => {
     const VALID_TYPES = ['trial', 'billable', 'demo'];
     if (accountType && !VALID_TYPES.includes(accountType)) {
       return res.status(400).json({ success: false, message: 'accountType must be trial, billable or demo' });
+    }
+
+    if (billingType && !['prepaid', 'postpaid'].includes(billingType)) {
+      return res.status(400).json({ success: false, message: 'billingType must be prepaid or postpaid' });
     }
 
     const client = await userService.createClient(req.user.id, {
@@ -115,6 +119,7 @@ const createClient = async (req, res) => {
       businessCategory,
       gtin,
       accountType,
+      billingType,
     });
 
     return res.status(201).json({ success: true, message: 'Client created successfully', data: client });
@@ -214,4 +219,23 @@ const extendClientTrial = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree, upgradeClient, extendClientTrial, getParentContact };
+/**
+ * PUT /api/users/clients/:clientId/billing-type
+ * Body: { billingType: 'prepaid' | 'postpaid' } — papa/dealer/canAddClient.
+ */
+const setClientBillingType = async (req, res) => {
+  try {
+    const isPapa = Number(req.user.parentId) === 0;
+    const isDealer = req.user.role === 'dealer';
+    const canAdd = req.user.permissions?.canAddClient === true;
+    if (!isPapa && !isDealer && !canAdd) {
+      return res.status(403).json({ success: false, message: 'You do not have permission to change billing type.' });
+    }
+    const result = await userService.setBillingType(Number(req.params.clientId), req.user.clientIds, req.body.billingType);
+    return res.json({ success: true, message: 'Billing type updated', data: result });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree, upgradeClient, extendClientTrial, getParentContact, setClientBillingType };

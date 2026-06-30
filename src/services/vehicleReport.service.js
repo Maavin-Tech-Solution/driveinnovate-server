@@ -375,7 +375,7 @@ async function getEngineHours(vehicleId, from, to, limit = 500, offset = 0) {
     where: { vehicleId, startTime: dateRange(from, to), status: 'completed' },
     attributes: ['durationSeconds', 'distanceKm', 'fuelConsumed', 'startFuelLevel', 'endFuelLevel', 'startTime', 'endTime'],
   });
-  const totalSecs = all.reduce((s, e) => s + (e.durationSeconds || 0), 0);
+  const totalSecs = all.reduce((s, e) => s + sessionDuration(e), 0);
   const totalDist = all.reduce((s, e) => s + parseFloat(e.distanceKm || 0), 0);
   const totalFuel = all.reduce((s, e) => s + parseFloat(e.fuelConsumed || 0), 0);
 
@@ -388,8 +388,8 @@ async function getEngineHours(vehicleId, from, to, limit = 500, offset = 0) {
       end: s.endTime,
       startLocation: s.startLocation || `${s.startLatitude},${s.startLongitude}`,
       endLocation: s.endLocation || (s.endLatitude ? `${s.endLatitude},${s.endLongitude}` : '—'),
-      engineHours: secsToHMS(s.durationSeconds),
-      engineHoursSecs: s.durationSeconds,
+      engineHours: secsToHMS(sessionDuration(s)),
+      engineHoursSecs: sessionDuration(s),
       mileage: parseFloat(s.distanceKm || 0).toFixed(3),
       consFls: parseFloat(s.fuelConsumed || 0).toFixed(2),
       startFuelLevel: s.startFuelLevel,

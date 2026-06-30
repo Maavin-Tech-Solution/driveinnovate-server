@@ -919,13 +919,13 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
   // Prepaid token billing: when enabled, spend 1 vehicle token and set billed-till
   // to +1 year in the SAME transaction as the insert — so an empty wallet leaves
   // no orphan vehicle behind, and a created vehicle always has a token backing it.
-  const { actor, consumeToken } = opts;
+  const { actor, consumeToken, tokenType } = opts;
   if (consumeToken) {
     const billingService = require('./billing.service');
     return sequelize.transaction(async (t) => {
       const vehicle = await Vehicle.create(fields, { transaction: t });
       const result = await billingService.activateOrRenew({
-        actor, vehicle, type: 'ACTIVATION', transaction: t,
+        actor, vehicle, type: 'ACTIVATION', tokenType, transaction: t,
       });
       // Surface billing outcome to the caller without an extra query.
       vehicle.setDataValue('tokenBalance', result.balanceAfter);
@@ -1406,8 +1406,15 @@ const getLivePositions = async (scope /*, since */) => {
     const s = stateMap.get(v.id) || {};
     const m = latest.get(_imeiKey(v.imei)); // newest GPS fix (fresh) or undefined
 
-    const lat = m && m.latitude  != null ? parseFloat(m.latitude)  : (s.lastLat != null ? parseFloat(s.lastLat) : null);
-    const lng = m && m.longitude != null ? parseFloat(m.longitude) : (s.lastLng != null ? parseFloat(s.lastLng) : null);
+    let lat = m && m.latitude  != null ? parseFloat(m.latitude)  : (s.lastLat != null ? parseFloat(s.lastLat) : null);
+    let lng = m && m.longitude != null ? parseFloat(m.longitude) : (s.lastLng != null ? parseFloat(s.lastLng) : null);
+    // India is wholly Northern + Eastern hemisphere (lat 8–37°N, lng 68–97°E).
+    // A GT06 course-status N/S bit flip occasionally stores a negative latitude
+    // straight in the raw collection (the normalizer's abs only fixes the state
+    // row, not this MongoDB overlay). Clamp so the marker can't jump to the
+    // Indian Ocean / Southern hemisphere.
+    if (lat != null) lat = Math.abs(lat);
+    if (lng != null) lng = Math.abs(lng);
     const speed = m ? (m.speed != null ? Number(m.speed) : 0) : (s.lastSpeed ?? null);
     const engineOn = m
       ? (m.ignition != null ? Boolean(Number(m.ignition)) : (m.acc != null ? Boolean(m.acc) : (s.engineOn ?? false)))

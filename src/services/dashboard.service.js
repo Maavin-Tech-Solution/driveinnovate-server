@@ -16,6 +16,23 @@ const getStats = async (scope) => {
   const vehicles = await Vehicle.findAll({ where: vehWhere(scope) });
   const vehicleIds = vehicles.map((v) => v.id);
 
+  // Subscription lifecycle counts (token billing). Actual expiry = paid term end;
+  // grace expiry = actual + grace days; vehicle stays usable until grace expiry.
+  const nowMs = Date.now();
+  const in30 = nowMs + 30 * 24 * 60 * 60 * 1000;
+  let subscriptionExpiringSoon = 0; // actual expiry within next 30 days, still active
+  let subscriptionInGrace = 0;       // past actual expiry but within grace
+  let subscriptionExpired = 0;       // past grace expiry
+  for (const v of vehicles) {
+    if (v.status === 'deleted') continue;
+    const actual = v.subscriptionExpiresAt ? new Date(v.subscriptionExpiresAt).getTime() : null;
+    if (actual == null) continue;
+    const grace = v.graceExpiresAt ? new Date(v.graceExpiresAt).getTime() : actual;
+    if (grace < nowMs) subscriptionExpired++;
+    else if (actual < nowMs) subscriptionInGrace++;
+    else if (actual <= in30) subscriptionExpiringSoon++;
+  }
+
   const [totalChallans, pendingChallans, challanAmountResult, vehicleRenewals] = await Promise.all([
     Challan.count({ where: { vehicleId: { [Op.in]: vehicleIds } } }),
     Challan.count({ where: { vehicleId: { [Op.in]: vehicleIds }, status: 'pending' } }),
@@ -39,6 +56,9 @@ const getStats = async (scope) => {
     pendingChallans,
     totalChallanAmount: challanAmountResult || 0,
     vehicleRenewals,
+    subscriptionExpiringSoon,
+    subscriptionInGrace,
+    subscriptionExpired,
   };
 };
 

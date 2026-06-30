@@ -39,6 +39,14 @@ const BillingRate = sequelize.define(
       field: 'set_by_user_id',
       comment: 'Dealer/papa who last set this rate',
     },
+
+    graceDays: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
+      field: 'grace_days',
+      comment: 'Extra days added beyond the 1-year term when this client activates/renews a vehicle',
+    },
   },
   {
     tableName: 'di_billing_rate',

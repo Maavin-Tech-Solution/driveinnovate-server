@@ -26,6 +26,9 @@ router.get('/quote', billingController.getQuote);
 // ── Renew a vehicle's subscription ───────────────────────────────────────────
 router.post('/vehicles/:id/renew', billingController.renewVehicle);
 
+// ── Papa: manually override a vehicle's expiry (no token spend) ──────────────
+router.put('/vehicles/:id/expiry', billingController.setVehicleExpiry);
+
 // ── Invoices ─────────────────────────────────────────────────────────────────
 router.get('/invoices',     billingController.getInvoices);
 router.get('/invoices/:id', billingController.getInvoice);

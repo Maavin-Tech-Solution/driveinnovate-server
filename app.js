@@ -13,6 +13,7 @@ const { startAlertEngine } = require('./src/services/alertEngine.service');
 const { seedBuiltIns } = require('./src/services/master.service');
 const { runMigrations } = require('./src/config/migrate');
 const { startTrialExpiryJob } = require('./src/jobs/trialExpiryJob');
+const { startVehicleExpiryJob } = require('./src/jobs/vehicleExpiryJob');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -177,6 +178,7 @@ sequelize
       console.log(`DriveInnovate Server running on ${proto} port ${PORT}`);
       startAlertEngine();
       startTrialExpiryJob();
+      startVehicleExpiryJob();
       // Run stale-trip reconciliation every 10 minutes so trips orphaned by
       // server spin-down (Render free tier) get closed without needing a restart.
       setInterval(reconcileStaleTrips, 10 * 60 * 1000);
