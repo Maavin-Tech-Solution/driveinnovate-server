@@ -1,8 +1,12 @@
 const { Challan, Vehicle } = require('../models');
 
-const getChallans = async (userId) => {
+// `clientIds` = the caller's full ownership scope ([self, ...descendants]);
+// challans are scoped through their vehicle's owner so papa/dealer see the
+// whole downstream fleet, not just directly-owned vehicles.
+const getChallans = async (clientIds) => {
+  const ids = Array.isArray(clientIds) && clientIds.length ? clientIds : [-1];
   return Challan.findAll({
-    include: [{ model: Vehicle, as: 'vehicle', where: { userId }, attributes: ['vehicleNumber', 'name'] }],
+    include: [{ model: Vehicle, as: 'vehicle', where: { clientId: ids }, attributes: ['vehicleNumber', 'vehicleName'] }],
     order: [['challanDate', 'DESC']],
   });
 };

@@ -5,7 +5,7 @@ const rtoService = require('../services/rto.service');
  */
 const getRtoDetails = async (req, res) => {
   try {
-    const rtoDetails = await rtoService.getRtoDetails(req.user.id);
+    const rtoDetails = await rtoService.getRtoDetails(req.user.clientIds || [req.user.id]);
     return res.json({ success: true, data: rtoDetails });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

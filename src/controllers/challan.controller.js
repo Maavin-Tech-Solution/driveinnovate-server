@@ -5,7 +5,7 @@ const challanService = require('../services/challan.service');
  */
 const getChallans = async (req, res) => {
   try {
-    const challans = await challanService.getChallans(req.user.id);
+    const challans = await challanService.getChallans(req.user.clientIds || [req.user.id]);
     return res.json({ success: true, data: challans });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

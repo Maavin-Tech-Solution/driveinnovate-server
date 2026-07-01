@@ -1,8 +1,12 @@
 const { RtoDetail, Vehicle } = require('../models');
 
-const getRtoDetails = async (userId) => {
+// `clientIds` = the caller's full ownership scope ([self, ...descendants]);
+// RTO rows are scoped through their vehicle's owner so papa/dealer see the
+// whole downstream fleet, not just directly-owned vehicles.
+const getRtoDetails = async (clientIds) => {
+  const ids = Array.isArray(clientIds) && clientIds.length ? clientIds : [-1];
   return RtoDetail.findAll({
-    include: [{ model: Vehicle, as: 'vehicle', where: { clientId: userId }, attributes: ['vehicleNumber', 'vehicleName', 'deviceType'] }],
+    include: [{ model: Vehicle, as: 'vehicle', where: { clientId: ids }, attributes: ['vehicleNumber', 'vehicleName', 'deviceType'] }],
   });
 };
 
