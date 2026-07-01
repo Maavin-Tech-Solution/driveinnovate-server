@@ -919,13 +919,13 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
   // Prepaid token billing: when enabled, spend 1 vehicle token and set billed-till
   // to +1 year in the SAME transaction as the insert — so an empty wallet leaves
   // no orphan vehicle behind, and a created vehicle always has a token backing it.
-  const { actor, consumeToken, tokenType } = opts;
+  const { actor, consumeToken } = opts;
   if (consumeToken) {
     const billingService = require('./billing.service');
     return sequelize.transaction(async (t) => {
       const vehicle = await Vehicle.create(fields, { transaction: t });
       const result = await billingService.activateOrRenew({
-        actor, vehicle, type: 'ACTIVATION', tokenType, transaction: t,
+        actor, vehicle, type: 'ACTIVATION', transaction: t,
       });
       // Surface billing outcome to the caller without an extra query.
       vehicle.setDataValue('tokenBalance', result.balanceAfter);

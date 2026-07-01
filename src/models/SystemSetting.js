@@ -27,12 +27,6 @@ const SystemSetting = sequelize.define('SystemSetting', {
 
   /** Default GST/tax % applied to invoices when an issuer has not set their own */
   defaultTaxPercent: { type: DataTypes.DECIMAL(5, 2), defaultValue: 0, allowNull: false },
-
-  /** Vehicle validity (days) granted by a TESTING token */
-  testPeriodDays: { type: DataTypes.INTEGER, defaultValue: 30, allowNull: false },
-
-  /** Vehicle validity (days) granted by a GRACE token */
-  gracePeriodDays: { type: DataTypes.INTEGER, defaultValue: 15, allowNull: false },
 }, {
   tableName: 'system_settings',
   timestamps: true,

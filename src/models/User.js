@@ -64,6 +64,14 @@ const User = sequelize.define(
       defaultValue: 'postpaid',
       field: 'billing_type',
     },
+    // Extra days added beyond the 1-year token term for this client's vehicles.
+    // Set at account creation (grace period).
+    graceDays: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
+      field: 'grace_days',
+    },
     // SmartChallan integration
     scEnabled:        { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_enabled' },
     scUsername:       { type: DataTypes.STRING(255), allowNull: true, field: 'sc_username' },

@@ -38,7 +38,7 @@ const getNetworkWallets = async (req, res) => {
 // ─── Coin movements ──────────────────────────────────────────────────────────
 const mint = async (req, res) => {
   try {
-    const data = await billingService.mintCoins({ actor: req.user, amount: req.body.amount, tokenType: req.body.tokenType, note: req.body.note });
+    const data = await billingService.mintCoins({ actor: req.user, amount: req.body.amount, note: req.body.note });
     return res.json({ success: true, message: 'Tokens minted', data });
   } catch (err) { return fail(res, err); }
 };
@@ -47,8 +47,7 @@ const transfer = async (req, res) => {
   try {
     const data = await billingService.transferCoins({
       actor: req.user, toUserId: req.body.toUserId,
-      vehicles: req.body.vehicles, unitPrice: req.body.unitPrice,
-      graceDays: req.body.graceDays, tokenType: req.body.tokenType, note: req.body.note,
+      vehicles: req.body.vehicles, unitPrice: req.body.unitPrice, note: req.body.note,
     });
     return res.json({ success: true, message: 'Vehicles added to wallet', data });
   } catch (err) { return fail(res, err); }
@@ -93,7 +92,7 @@ const getQuote = async (req, res) => {
 // ─── Renew (spend 1 token, +1 year) ──────────────────────────────────────────
 const renewVehicle = async (req, res) => {
   try {
-    const data = await billingService.renewVehicle({ actor: req.user, vehicleId: req.params.id, tokenType: req.body.tokenType });
+    const data = await billingService.renewVehicle({ actor: req.user, vehicleId: req.params.id });
     return res.json({ success: true, message: 'Vehicle renewed', data });
   } catch (err) { return fail(res, err); }
 };

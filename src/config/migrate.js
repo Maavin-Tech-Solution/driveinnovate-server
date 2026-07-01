@@ -52,6 +52,7 @@ const MIGRATIONS = [
   { table: 'di_user', column: 'trial_expires_at', ddl: 'DATETIME NULL COMMENT "Trial expiry timestamp; NULL = no expiry enforced"' },
   { table: 'di_user', column: 'kind',             ddl: "ENUM('account','member') NOT NULL DEFAULT 'account' COMMENT \"account=papa/dealer/client hierarchy user; member=restricted team-member login\"" },
   { table: 'di_user', column: 'billing_type',     ddl: "ENUM('prepaid','postpaid') NOT NULL DEFAULT 'postpaid' COMMENT \"prepaid=wallet-token billing; postpaid=billed outside the module\"" },
+  { table: 'di_user', column: 'grace_days',       ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Extra days beyond the 1-year token term (grace period, set at account creation)"' },
 
   // ── di_user_permissions (Teams feature) ───────────────────────────────────
   { table: 'di_user_permissions', column: 'can_manage_teams', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Can create/manage teams and team members"' },
@@ -114,9 +115,6 @@ const MIGRATIONS = [
   { table: 'di_wallet', column: 'balance_testing', ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Testing tokens"' },
   { table: 'di_wallet', column: 'balance_grace',   ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Grace/complimentary tokens"' },
 
-  // ── Token validity durations by type (camelCase — SystemSetting not underscored) ──
-  { table: 'system_settings', column: 'testPeriodDays',  ddl: 'INT NOT NULL DEFAULT 30 COMMENT "Vehicle validity days granted by a TESTING token"' },
-  { table: 'system_settings', column: 'gracePeriodDays', ddl: 'INT NOT NULL DEFAULT 15 COMMENT "Vehicle validity days granted by a GRACE token"' },
 ];
 
 /**

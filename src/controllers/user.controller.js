@@ -6,7 +6,17 @@ const userService = require('../services/user.service');
 const getProfile = async (req, res) => {
   try {
     const user = await userService.getProfile(req.user.id);
-    return res.json({ success: true, data: user });
+    // Merge the FRESHLY-derived hierarchy fields (validateConsumer recomputes
+    // these every request) so the client can refresh a stale session — e.g. a
+    // leaf client that just created a sub-account is now a dealer.
+    const data = {
+      ...user.toJSON(),
+      role: req.user.role,
+      hasClients: req.user.hasClients,
+      clientIds: req.user.clientIds,
+      permissions: req.user.permissions,
+    };
+    return res.json({ success: true, data });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
   }
@@ -87,7 +97,7 @@ const createClient = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You do not have permission to add clients.' });
     }
 
-    const { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType, billingType } = req.body;
+    const { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType, billingType, graceDays } = req.body;
     if (!name || !email || !phone || !password) {
       return res.status(400).json({ success: false, message: 'name, email, phone and password are required' });
     }
@@ -120,6 +130,7 @@ const createClient = async (req, res) => {
       gtin,
       accountType,
       billingType,
+      graceDays,
     });
 
     return res.status(201).json({ success: true, message: 'Client created successfully', data: client });

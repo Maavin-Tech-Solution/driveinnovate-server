@@ -2,23 +2,31 @@ const express = require('express');
 const router = express.Router();
 const billingController = require('../controllers/billing.controller');
 const validateConsumer = require('../middleware/validateConsumer');
-const requirePermission = require('../middleware/requirePermission');
 
 // All billing routes require an authenticated user.
 router.use(validateConsumer);
+
+// Billing-management guard: anyone with a downline (papa/dealer) OR the explicit
+// canManageBilling permission can recharge/manage. This is what lets a DEALER
+// recharge its own direct sub-dealers/clients (not just papa).
+const requireBillingManager = (req, res, next) => {
+  const u = req.user;
+  if (u?.role === 'papa' || u?.hasClients === true || u?.permissions?.canManageBilling === true) return next();
+  return res.status(403).json({ success: false, message: 'You do not have permission to manage billing.' });
+};
 
 // ── Wallet (any authenticated user may view their OWN wallet/ledger) ──────────
 router.get('/wallet',              billingController.getMyWallet);
 router.get('/wallet/transactions', billingController.getTransactions);
 
-// ── Network coin chain (dealer/papa) — gated by canManageBilling ─────────────
-router.get('/network/wallets',  requirePermission('canManageBilling'), billingController.getNetworkWallets);
-router.post('/mint',            requirePermission('canManageBilling'), billingController.mint);
-router.post('/transfer',        requirePermission('canManageBilling'), billingController.transfer);
+// ── Network chain (papa + any dealer over their own direct children) ─────────
+router.get('/network/wallets',  requireBillingManager, billingController.getNetworkWallets);
+router.post('/mint',            requireBillingManager, billingController.mint);      // service enforces papa-only
+router.post('/transfer',        requireBillingManager, billingController.transfer);
 
-// ── Rate card (dealer/papa) ──────────────────────────────────────────────────
-router.get('/rates',                requirePermission('canManageBilling'), billingController.getRates);
-router.put('/rates/:clientId',      requirePermission('canManageBilling'), billingController.setRate);
+// ── Rate card (papa / dealer) ────────────────────────────────────────────────
+router.get('/rates',                requireBillingManager, billingController.getRates);
+router.put('/rates/:clientId',      requireBillingManager, billingController.setRate);
 
 // ── Quote (preview cost before charging) ─────────────────────────────────────
 router.get('/quote', billingController.getQuote);
@@ -35,6 +43,6 @@ router.get('/invoices/:id', billingController.getInvoice);
 
 // ── Issuer billing settings (GST + branding) ─────────────────────────────────
 router.get('/settings',  billingController.getSettings);
-router.put('/settings',  requirePermission('canManageBilling'), billingController.updateSettings);
+router.put('/settings',  requireBillingManager, billingController.updateSettings);
 
 module.exports = router;

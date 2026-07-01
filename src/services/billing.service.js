@@ -37,35 +37,29 @@ const addMonths = (date, n) => {
  * concurrent debits can never both pass the balance check. Throws
  * INSUFFICIENT_FUNDS (402) when a debit would push the balance below zero.
  */
-const TYPE_COL = { PAID: 'balancePaid', TESTING: 'balanceTesting', GRACE: 'balanceGrace' };
-
 const adjustWallet = async ({
   userId, delta, type, refType, refId = null,
   counterpartyUserId = null, performedByUserId = null,
-  groupRef = null, note = null, tokenType = 'PAID', allowNegative = false, transaction,
+  groupRef = null, note = null, allowNegative = false, transaction,
 }) => {
   if (!transaction) throw httpError('adjustWallet requires a transaction', 500);
-  const col = TYPE_COL[tokenType] || TYPE_COL.PAID;
 
-  // Lazily create, then lock the row so we read the committed balances.
+  // Lazily create, then lock the row so we read the committed balance.
   await Wallet.findOrCreate({ where: { userId }, defaults: { userId, balance: 0 }, transaction });
   const wallet = await Wallet.findOne({ where: { userId }, lock: transaction.LOCK.UPDATE, transaction });
 
   if (wallet.status === 'frozen') throw httpError('This wallet is frozen. Contact support.', 423);
 
-  // The delta applies to ONE token-type bucket; the total balance is the sum.
-  const currentType = Number(wallet[col]);
-  const nextType = Math.round(currentType + Number(delta));
-  if (!allowNegative && nextType < 0) {
+  const current = Math.round(Number(wallet.balance));
+  const next = Math.round(current + Number(delta));
+  if (!allowNegative && next < 0) {
     throw httpError('Insufficient tokens in wallet', 402, {
       code: 'INSUFFICIENT_FUNDS',
-      details: { tokenType, balance: currentType, required: Math.abs(Number(delta)), shortfall: Math.abs(nextType) },
+      details: { balance: current, required: Math.abs(Number(delta)), shortfall: Math.abs(next) },
     });
   }
 
-  wallet[col] = nextType;
-  const total = Number(wallet.balancePaid) + Number(wallet.balanceTesting) + Number(wallet.balanceGrace);
-  wallet.balance = total;
+  wallet.balance = next;
   await wallet.save({ transaction });
 
   const txn = await WalletTransaction.create({
@@ -75,15 +69,14 @@ const adjustWallet = async ({
     refType,
     refId,
     amount: round2(delta),
-    balanceAfter: total,
+    balanceAfter: next,
     counterpartyUserId,
     performedByUserId,
     groupRef,
     note,
-    tokenType,
   }, { transaction });
 
-  return { wallet, txn, balanceAfter: total, typeBalanceAfter: nextType };
+  return { wallet, txn, balanceAfter: next };
 };
 
 // ─── Rates ───────────────────────────────────────────────────────────────────
@@ -196,51 +189,26 @@ const snapshotParty = (user, meta) => ({
  */
 const addDays = (date, n) => { const d = new Date(date); d.setDate(d.getDate() + n); return d; };
 
-/** Grace days configured for a client (BillingRate.graceDays, default 0). */
+/** Grace days for a client — set on the User at account creation (default 0). */
 const resolveGraceDays = async (clientId, transaction) => {
-  const row = await BillingRate.findOne({ where: { clientId }, transaction });
-  return row ? Number(row.graceDays || 0) : 0;
+  const u = await User.findByPk(clientId, { attributes: ['graceDays'], transaction });
+  return u ? Number(u.graceDays || 0) : 0;
 };
 
-/**
- * The validity a token of `tokenType` grants:
- *   PAID    → 12 months, plus the client's grace days as a buffer (graceExpiry > actual).
- *   TESTING → testPeriodDays  (system setting), no buffer.
- *   GRACE   → gracePeriodDays (system setting), no buffer.
- * Returns { actual, grace } absolute dates measured from `start`.
- */
-const computeExpiry = async ({ start, tokenType, clientId, transaction }) => {
-  const settings = await getSystemSettings();
-  if (tokenType === 'TESTING') {
-    const actual = addDays(start, Number(settings.testPeriodDays) || 30);
-    return { actual, grace: actual };
-  }
-  if (tokenType === 'GRACE') {
-    const actual = addDays(start, Number(settings.gracePeriodDays) || 15);
-    return { actual, grace: actual };
-  }
-  // PAID
-  const actual = addMonths(start, SUBSCRIPTION_MONTHS);
-  const buffer = await resolveGraceDays(clientId, transaction);
-  return { actual, grace: buffer > 0 ? addDays(actual, buffer) : actual };
-};
-
-const activateOrRenew = async ({ actor, vehicle, type, tokenType = 'PAID', transaction }) => {
+const activateOrRenew = async ({ actor, vehicle, type, transaction }) => {
   const clientId = vehicle.clientId;
-  const tt = normTokenType(tokenType);
   const refType = type === 'ACTIVATION' ? 'VEHICLE_ACTIVATION' : 'VEHICLE_RENEWAL';
   const label = type === 'ACTIVATION' ? 'Activation' : 'Renewal';
 
-  // 1. Spend 1 token of the chosen type (throws → rolls back).
+  // 1. Spend 1 vehicle token (throws → rolls back).
   const { txn, balanceAfter } = await adjustWallet({
     userId: clientId,
     delta: -TOKENS_PER_VEHICLE,
     type: 'DEBIT',
     refType,
-    tokenType: tt,
     performedByUserId: actor?.id || null,
     refId: vehicle.id,
-    note: `${label} – ${vehicle.vehicleNumber || vehicle.imei || `vehicle #${vehicle.id}`} (1 ${tt.toLowerCase()} token)`,
+    note: `${label} – ${vehicle.vehicleNumber || vehicle.imei || `vehicle #${vehicle.id}`} (1 vehicle token)`,
     transaction,
   });
 
@@ -251,9 +219,11 @@ const activateOrRenew = async ({ actor, vehicle, type, tokenType = 'PAID', trans
     const cur = vehicle.subscriptionExpiresAt ? new Date(vehicle.subscriptionExpiresAt) : null;
     periodStart = cur && cur > now ? cur : now;
   }
+  const actualExpiry = addMonths(periodStart, SUBSCRIPTION_MONTHS);
 
-  // 3. Duration depends on the token type spent.
-  const { actual: actualExpiry, grace: graceExpiry } = await computeExpiry({ start: periodStart, tokenType: tt, clientId, transaction });
+  // 3. GRACE expiry = actual + the client's grace days (set at account creation).
+  const graceDays = await resolveGraceDays(clientId, transaction);
+  const graceExpiry = graceDays > 0 ? addDays(actualExpiry, graceDays) : actualExpiry;
 
   // 4. Set both dates, reactivate the vehicle, and clear the reminder so the next
   //    term reminds again.
@@ -264,18 +234,20 @@ const activateOrRenew = async ({ actor, vehicle, type, tokenType = 'PAID', trans
     status: 'active',
   }, { transaction });
 
-  return { tokenTxnId: txn.id, balanceAfter, periodEnd: actualExpiry, graceExpiry, tokenType: tt };
+  return { tokenTxnId: txn.id, balanceAfter, periodEnd: actualExpiry, graceExpiry, graceDays };
 };
 
-/** Renew an existing vehicle — spends 1 token of `tokenType` (opens its own transaction). */
-const renewVehicle = async ({ actor, vehicleId, tokenType = 'PAID' }) => {
+/** Renew an existing vehicle — spends 1 token (opens its own transaction). */
+const renewVehicle = async ({ actor, vehicleId }) => {
   return sequelize.transaction(async (t) => {
     const vehicle = await Vehicle.findOne({ where: { id: vehicleId }, lock: t.LOCK.UPDATE, transaction: t });
     if (!vehicle) throw httpError('Vehicle not found', 404);
     if (!actor.clientIds?.includes(vehicle.clientId)) throw httpError('You do not have access to this vehicle.', 403);
-    const owner = await User.findByPk(vehicle.clientId, { attributes: ['billingType'], transaction: t });
-    if (owner?.billingType !== 'prepaid') throw httpError('This client is on postpaid billing — token renewal does not apply.', 400);
-    const result = await activateOrRenew({ actor, vehicle, type: 'RENEWAL', tokenType, transaction: t });
+    const owner = await User.findByPk(vehicle.clientId, { attributes: ['billingType', 'accountType'], transaction: t });
+    if (owner?.billingType !== 'prepaid' || owner?.accountType !== 'billable') {
+      throw httpError('Token renewal only applies to billable prepaid clients.', 400);
+    }
+    const result = await activateOrRenew({ actor, vehicle, type: 'RENEWAL', transaction: t });
     return {
       balanceAfter: result.balanceAfter,
       subscriptionExpiresAt: result.periodEnd,
@@ -317,20 +289,16 @@ const setVehicleExpiry = async ({ actor, vehicleId, subscriptionExpiresAt, grace
   };
 };
 
-const TOKEN_TYPES = ['PAID', 'TESTING', 'GRACE'];
-const normTokenType = (tt) => (TOKEN_TYPES.includes(tt) ? tt : 'PAID');
-
 // ─── Token movements: mint + recharge (the chain) ────────────────────────────
 /** Papa mints vehicle tokens into its own wallet — the origin of all tokens. */
-const mintCoins = async ({ actor, amount, tokenType, note }) => {
+const mintCoins = async ({ actor, amount, note }) => {
   if (actor.role !== 'papa') throw httpError('Only the network owner can mint tokens.', 403);
   const amt = Number(amount);
   if (!Number.isInteger(amt) || amt <= 0) throw httpError('Enter a whole number of vehicle tokens', 400);
-  const tt = normTokenType(tokenType);
   return sequelize.transaction(async (t) => {
     const { balanceAfter, txn } = await adjustWallet({
-      userId: actor.id, delta: amt, type: 'MINT', refType: 'MINT', tokenType: tt,
-      performedByUserId: actor.id, note: note || `Minted ${amt} ${tt === 'PAID' ? '' : tt.toLowerCase() + ' '}vehicle token${amt > 1 ? 's' : ''}`.replace('  ', ' '), transaction: t,
+      userId: actor.id, delta: amt, type: 'MINT', refType: 'MINT',
+      performedByUserId: actor.id, note: note || `Minted ${amt} vehicle token${amt > 1 ? 's' : ''}`, transaction: t,
     });
     return { balanceAfter, transactionId: txn.id };
   });
@@ -338,13 +306,12 @@ const mintCoins = async ({ actor, amount, tokenType, note }) => {
 
 /**
  * Recharge a DIRECT child's wallet with VEHICLE TOKENS (the chain: papa → dealer
- * → client). The parent enters the number of vehicles; that many TOKENS move
- * from the parent's wallet to the child's (parent must hold enough). The ₹ value
- * of the sale = `vehicles × per-vehicle price` (asked at recharge, default = the
- * child's stored rate) + GST, captured on a printable RECHARGE invoice. Token
- * moves + invoice are atomic and linked by a shared groupRef.
+ * → client). The parent enters the number of vehicles; that many TOKENS move from
+ * the parent's wallet to the child's (parent must hold enough). The ₹ value of
+ * the sale = `vehicles × per-vehicle price` (+ GST) is captured on a printable
+ * RECHARGE invoice. Token moves + invoice are atomic (shared groupRef).
  */
-const transferCoins = async ({ actor, toUserId, vehicles, unitPrice, graceDays, tokenType, note }) => {
+const transferCoins = async ({ actor, toUserId, vehicles, unitPrice, note }) => {
   const recipientId = Number(toUserId);
   if (recipientId === Number(actor.id)) throw httpError('Cannot transfer to your own wallet', 400);
 
@@ -357,49 +324,36 @@ const transferCoins = async ({ actor, toUserId, vehicles, unitPrice, graceDays, 
   const count = Number(vehicles);
   if (!Number.isInteger(count) || count <= 0) throw httpError('Enter a whole number of vehicles', 400);
 
-  const tt = normTokenType(tokenType);
-  const accountable = tt === 'PAID';          // free tokens don't hit accounting
-  const grace = graceDays == null || graceDays === '' ? null : Number(graceDays);
-  if (grace != null && (!Number.isInteger(grace) || grace < 0)) throw httpError('Grace days must be a whole number ≥ 0', 400);
-
-  // ₹ value of the sale. PAID = priced; TESTING/GRACE = free (zeroed).
   const money = await computeRechargeAmount({ sellerId: actor.id, buyerId: recipientId, vehicles: count, unitPrice });
-  const billed = accountable
-    ? money
-    : { ...money, baseAmount: 0, taxAmount: 0, total: 0 };
-  const ttLabel = tt === 'PAID' ? '' : ` [${tt.toLowerCase()}]`;
-  const detail = `${count} vehicle${count > 1 ? 's' : ''}${accountable ? ` × ₹${money.unitPrice}/yr` : ' (free)'}${ttLabel}`;
+  const detail = `${count} vehicle${count > 1 ? 's' : ''} × ₹${money.unitPrice}/yr`;
   const groupRef = crypto.randomUUID();
 
   return sequelize.transaction(async (t) => {
-    // Persist the per-vehicle price and/or grace days the parent set at recharge.
-    if ((unitPrice != null && unitPrice !== '') || grace != null) {
+    // Persist the per-vehicle price the parent set/changed at recharge.
+    if (unitPrice != null && unitPrice !== '') {
       const [rateRow] = await BillingRate.findOrCreate({
         where: { clientId: recipientId },
-        defaults: { clientId: recipientId, monthlyPrice: money.unitPrice, setByUserId: actor.id, graceDays: grace ?? 0 },
+        defaults: { clientId: recipientId, monthlyPrice: money.unitPrice, setByUserId: actor.id },
         transaction: t,
       });
-      const upd = { setByUserId: actor.id };
-      if (unitPrice != null && unitPrice !== '') upd.monthlyPrice = money.unitPrice;
-      if (grace != null) upd.graceDays = grace;
-      await rateRow.update(upd, { transaction: t });
+      await rateRow.update({ monthlyPrice: money.unitPrice, setByUserId: actor.id }, { transaction: t });
     }
 
-    // Pre-create + lock both wallets (token balances) in a stable order.
+    // Pre-create + lock both wallets in a stable order.
     await Wallet.findOrCreate({ where: { userId: actor.id }, defaults: { userId: actor.id, balance: 0 }, transaction: t });
     await Wallet.findOrCreate({ where: { userId: recipientId }, defaults: { userId: recipientId, balance: 0 }, transaction: t });
     for (const uid of [actor.id, recipientId].sort((a, b) => a - b)) {
       await Wallet.findOne({ where: { userId: uid }, lock: t.LOCK.UPDATE, transaction: t });
     }
 
-    // Move TOKENS (vehicles), not money. Parent must hold >= count tokens.
+    // Move TOKENS (vehicles). Parent must hold >= count tokens.
     const debit = await adjustWallet({
-      userId: actor.id, delta: -count, type: 'DEBIT', refType: 'TRANSFER', tokenType: tt,
+      userId: actor.id, delta: -count, type: 'DEBIT', refType: 'TRANSFER',
       counterpartyUserId: recipientId, performedByUserId: actor.id, groupRef,
       note: note || `Recharge to ${recipient.name} — ${detail}`, transaction: t,
     });
     const credit = await adjustWallet({
-      userId: recipientId, delta: count, type: 'CREDIT', refType: 'TRANSFER', tokenType: tt,
+      userId: recipientId, delta: count, type: 'CREDIT', refType: 'TRANSFER',
       counterpartyUserId: actor.id, performedByUserId: actor.id, groupRef,
       note: note || `Recharge from ${actor.name} — ${detail}`, transaction: t,
     });
@@ -416,8 +370,6 @@ const transferCoins = async ({ actor, toUserId, vehicles, unitPrice, graceDays, 
       invoiceNumber,
       type: 'RECHARGE',
       status: 'PAID',
-      tokenType: tt,
-      accountable,
       clientId: recipientId,
       issuedByUserId: actor.id,
       vehicleId: null,
@@ -427,10 +379,10 @@ const transferCoins = async ({ actor, toUserId, vehicles, unitPrice, graceDays, 
       periodStart: null,
       periodEnd: null,
       monthlyPrice: money.unitPrice,
-      baseAmount: billed.baseAmount,
-      taxPercent: accountable ? money.taxPercent : 0,
-      taxAmount: billed.taxAmount,
-      totalAmount: billed.total,
+      baseAmount: money.baseAmount,
+      taxPercent: money.taxPercent,
+      taxAmount: money.taxAmount,
+      totalAmount: money.total,
       walletTransactionId: debit.txn.id,
       issuerSnapshot: snapshotParty(seller, sellerMeta),
       clientSnapshot: snapshotParty(buyer, buyerMeta),
@@ -440,8 +392,7 @@ const transferCoins = async ({ actor, toUserId, vehicles, unitPrice, graceDays, 
 
     return {
       fromBalance: debit.balanceAfter, toBalance: credit.balanceAfter,
-      vehicles: count, unitPrice: money.unitPrice, amount: billed.total,
-      tokenType: tt, accountable, graceDays: grace ?? undefined,
+      vehicles: count, unitPrice: money.unitPrice, amount: money.total,
       invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, groupRef,
     };
   });
@@ -464,19 +415,12 @@ const serializeTxn = (t) => ({
 
 const TXN_INCLUDE = [{ model: User, as: 'counterparty', attributes: ['id', 'name'] }];
 
-const walletBalances = (w) => ({
-  balance: Number(w.balance),
-  balancePaid: Number(w.balancePaid || 0),
-  balanceTesting: Number(w.balanceTesting || 0),
-  balanceGrace: Number(w.balanceGrace || 0),
-});
-
 const getMyWallet = async (user) => {
   const [wallet] = await Wallet.findOrCreate({ where: { userId: user.id }, defaults: { userId: user.id, balance: 0 } });
   const recent = await WalletTransaction.findAll({
     where: { userId: user.id }, include: TXN_INCLUDE, order: [['created_at', 'DESC']], limit: 15,
   });
-  return { userId: user.id, ...walletBalances(wallet), status: wallet.status, recent: recent.map(serializeTxn) };
+  return { userId: user.id, balance: Number(wallet.balance), status: wallet.status, recent: recent.map(serializeTxn) };
 };
 
 const listTransactions = async ({ user, targetUserId, page = 1, limit = 25 }) => {
@@ -508,7 +452,6 @@ const listNetworkWallets = async (user) => {
   ]);
   const walByUser = Object.fromEntries(wallets.map((w) => [w.user_id ?? w.userId, w]));
   const rateByUser = Object.fromEntries(rates.map((r) => [r.client_id ?? r.clientId, Number(r.monthly_price ?? r.monthlyPrice)]));
-  const graceByUser = Object.fromEntries(rates.map((r) => [r.client_id ?? r.clientId, Number(r.grace_days ?? r.graceDays ?? 0)]));
   return children.map((c) => {
     const w = walByUser[c.id];
     return {
@@ -518,12 +461,8 @@ const listNetworkWallets = async (user) => {
       status: c.status,
       billingType: c.billingType || c.billing_type || 'postpaid',
       balance: w ? Number(w.balance) : 0,
-      balancePaid: w ? Number(w.balance_paid ?? w.balancePaid ?? 0) : 0,
-      balanceTesting: w ? Number(w.balance_testing ?? w.balanceTesting ?? 0) : 0,
-      balanceGrace: w ? Number(w.balance_grace ?? w.balanceGrace ?? 0) : 0,
       monthlyPrice: rateByUser[c.id] ?? Number(settings.defaultMonthlyPrice || 0),
       rateSource: rateByUser[c.id] != null ? 'client' : 'default',
-      graceDays: graceByUser[c.id] ?? 0,
     };
   });
 };

@@ -75,7 +75,7 @@ const updateNotifications = async (userId, { emailNotifications, smsNotification
 
 const createClient = async (
   parentUserId,
-  { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType, billingType }
+  { name, email, phone, password, companyName, address, state, city, zip, country, businessCategory, gtin, accountType, billingType, graceDays }
 ) => {
   const existing = await User.findOne({ where: { email } });
   if (existing) {
@@ -104,6 +104,7 @@ const createClient = async (
       accountType: resolvedType,
       trialExpiresAt,
       billingType: billingType === 'prepaid' ? 'prepaid' : 'postpaid',
+      graceDays: Number.isInteger(Number(graceDays)) && Number(graceDays) >= 0 ? Number(graceDays) : 0,
     });
   } catch (e) {
     if (e instanceof UniqueConstraintError) {
