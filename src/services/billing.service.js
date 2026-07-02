@@ -159,6 +159,10 @@ const quoteRecharge = async ({ actor, toUserId, vehicles, unitPrice }) => {
 };
 
 // ─── Invoice numbering ───────────────────────────────────────────────────────
+// The counter is per-issuer/year (each issuer gets a clean 1..N sequence), so the
+// issuer id MUST be part of the number string — otherwise two issuers both emit
+// "<prefix>-<year>-000001" and the globally-unique invoice_number column throws a
+// unique-constraint error (Sequelize surfaces it as "Validation error").
 const allocateInvoiceNumber = async ({ issuerId, prefix, date, transaction }) => {
   const year = date.getFullYear();
   const scope = String(issuerId);
@@ -166,7 +170,7 @@ const allocateInvoiceNumber = async ({ issuerId, prefix, date, transaction }) =>
   const counter = await InvoiceCounter.findOne({ where: { scope, year }, lock: transaction.LOCK.UPDATE, transaction });
   const next = Number(counter.seq) + 1;
   await counter.update({ seq: next }, { transaction });
-  return `${prefix || 'INV'}-${year}-${String(next).padStart(6, '0')}`;
+  return `${prefix || 'INV'}-${scope}-${year}-${String(next).padStart(6, '0')}`;
 };
 
 const snapshotParty = (user, meta) => ({
