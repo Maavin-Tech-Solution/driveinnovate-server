@@ -23,6 +23,9 @@ const getTransactions = async (req, res) => {
       targetUserId: req.query.userId,
       page: req.query.page,
       limit: req.query.limit,
+      direction: req.query.direction,
+      from: req.query.from,
+      to: req.query.to,
     });
     return res.json({ success: true, data });
   } catch (err) { return fail(res, err); }

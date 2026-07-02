@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { Op } = require('sequelize');
 const {
   sequelize, User, UserMeta, Vehicle,
   Wallet, WalletTransaction, BillingRate, Invoice, InvoiceCounter,
@@ -414,7 +415,9 @@ const serializeTxn = (t) => ({
   counterpartyUserId: t.counterpartyUserId,
   counterpartyName: t.counterparty?.name || null,
   note: t.note,
-  createdAt: t.get('created_at'),
+  // `underscored:true` maps the timestamp to column created_at but the ATTRIBUTE
+  // is still createdAt — reading 'created_at' returns undefined → "Invalid Date".
+  createdAt: t.get('createdAt') || t.get('created_at'),
 });
 
 const TXN_INCLUDE = [{ model: User, as: 'counterparty', attributes: ['id', 'name'] }];
@@ -427,16 +430,28 @@ const getMyWallet = async (user) => {
   return { userId: user.id, balance: Number(wallet.balance), status: wallet.status, recent: recent.map(serializeTxn) };
 };
 
-const listTransactions = async ({ user, targetUserId, page = 1, limit = 25 }) => {
+const listTransactions = async ({ user, targetUserId, page = 1, limit = 25, direction, from, to }) => {
   let userId = user.id;
   if (targetUserId && Number(targetUserId) !== Number(user.id)) {
     if (!user.clientIds?.includes(Number(targetUserId))) throw httpError('You do not have access to this wallet.', 403);
     userId = Number(targetUserId);
   }
-  const lim = Math.min(Number(limit) || 25, 200);
+
+  const where = { userId };
+  // Direction: credit = tokens in (amount > 0), debit = tokens out (amount < 0).
+  if (direction === 'credit') where.amount = { [Op.gt]: 0 };
+  else if (direction === 'debit') where.amount = { [Op.lt]: 0 };
+  // Date range on created_at (inclusive; `to` covers the whole day).
+  if (from || to) {
+    where.created_at = {};
+    if (from) where.created_at[Op.gte] = new Date(`${from}T00:00:00`);
+    if (to)   where.created_at[Op.lte] = new Date(`${to}T23:59:59.999`);
+  }
+
+  const lim = Math.min(Number(limit) || 25, 5000); // high cap allows export of all rows
   const offset = (Math.max(Number(page) || 1, 1) - 1) * lim;
   const { count, rows } = await WalletTransaction.findAndCountAll({
-    where: { userId }, include: TXN_INCLUDE, order: [['created_at', 'DESC']], limit: lim, offset,
+    where, include: TXN_INCLUDE, order: [['created_at', 'DESC']], limit: lim, offset,
   });
   return { total: count, page: Number(page) || 1, limit: lim, rows: rows.map(serializeTxn) };
 };
