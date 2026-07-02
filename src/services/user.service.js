@@ -391,18 +391,30 @@ const extendTrial = async (clientId, callerClientIds, newExpiresAt) => {
   return { accountType: 'trial', trialExpiresAt: expiry };
 };
 
-/** Switch a client between prepaid (wallet tokens) and postpaid billing. */
-const setBillingType = async (clientId, callerClientIds, billingType) => {
-  if (!['prepaid', 'postpaid'].includes(billingType)) {
-    const err = new Error('billingType must be prepaid or postpaid'); err.status = 400; throw err;
-  }
+/** Update a client's billing settings: billing type and/or grace period (days). */
+const setBillingType = async (clientId, callerClientIds, { billingType, graceDays } = {}) => {
   if (callerClientIds?.length && !callerClientIds.includes(Number(clientId))) {
     const err = new Error('You do not have access to this client.'); err.status = 403; throw err;
   }
   const client = await User.findByPk(clientId);
   if (!client) { const err = new Error('Client not found'); err.status = 404; throw err; }
-  await client.update({ billingType });
-  return { id: client.id, billingType: client.billingType };
+
+  const updates = {};
+  if (billingType !== undefined) {
+    if (!['prepaid', 'postpaid'].includes(billingType)) {
+      const err = new Error('billingType must be prepaid or postpaid'); err.status = 400; throw err;
+    }
+    updates.billingType = billingType;
+  }
+  if (graceDays !== undefined && graceDays !== null && graceDays !== '') {
+    const g = Number(graceDays);
+    if (!Number.isInteger(g) || g < 0) { const err = new Error('Grace period must be a whole number ≥ 0'); err.status = 400; throw err; }
+    updates.graceDays = g;
+  }
+  if (!Object.keys(updates).length) { const err = new Error('Nothing to update'); err.status = 400; throw err; }
+
+  await client.update(updates);
+  return { id: client.id, billingType: client.billingType, graceDays: client.graceDays };
 };
 
 module.exports = {

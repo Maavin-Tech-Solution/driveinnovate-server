@@ -232,7 +232,7 @@ const extendClientTrial = async (req, res) => {
 
 /**
  * PUT /api/users/clients/:clientId/billing-type
- * Body: { billingType: 'prepaid' | 'postpaid' } — papa/dealer/canAddClient.
+ * Body: { billingType?: 'prepaid'|'postpaid', graceDays?: number } — papa/dealer/canAddClient.
  */
 const setClientBillingType = async (req, res) => {
   try {
@@ -240,10 +240,13 @@ const setClientBillingType = async (req, res) => {
     const isDealer = req.user.role === 'dealer';
     const canAdd = req.user.permissions?.canAddClient === true;
     if (!isPapa && !isDealer && !canAdd) {
-      return res.status(403).json({ success: false, message: 'You do not have permission to change billing type.' });
+      return res.status(403).json({ success: false, message: 'You do not have permission to change billing settings.' });
     }
-    const result = await userService.setBillingType(Number(req.params.clientId), req.user.clientIds, req.body.billingType);
-    return res.json({ success: true, message: 'Billing type updated', data: result });
+    const result = await userService.setBillingType(Number(req.params.clientId), req.user.clientIds, {
+      billingType: req.body.billingType,
+      graceDays: req.body.graceDays,
+    });
+    return res.json({ success: true, message: 'Billing settings updated', data: result });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
   }
