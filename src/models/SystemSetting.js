@@ -16,8 +16,11 @@ const SystemSetting = sequelize.define('SystemSetting', {
   /** Master switch — enables trial account type with expiry enforcement */
   trialAccountEnabled: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
 
-  /** How many days a newly created trial account is valid (default 30) */
-  trialDurationDays: { type: DataTypes.INTEGER, defaultValue: 30, allowNull: false },
+  /** How many days a newly created trial account is valid (default 5) */
+  trialDurationDays: { type: DataTypes.INTEGER, defaultValue: 5, allowNull: false },
+
+  /** Max vehicles a trial account may register (default 10) */
+  trialVehicleLimit: { type: DataTypes.INTEGER, defaultValue: 10, allowNull: false },
 
   /** Master switch — when false the prepaid billing module is hidden/disabled */
   billingEnabled: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },

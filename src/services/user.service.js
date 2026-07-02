@@ -314,44 +314,24 @@ const buildClientTree = async (parentId, depth = 0) => {
 const PLAN_DAYS = { '3months': 90, '6months': 180, '1year': 365 };
 
 /**
- * Upgrade a client account to billable.
- * Sets accountType='billable' on the User and stamps subscriptionExpiresAt
- * on every active vehicle owned by the client.
- * @param {number}   clientId       — the user to upgrade
- * @param {number[]} callerClientIds — must include clientId (access check)
- * @param {'3months'|'6months'|'1year'} plan
+ * Upgrade a client account to billable. In the token billing model there is no
+ * per-account duration — vehicle validity comes from tokens spent at add/renew.
+ * So this just flips accountType→billable and clears the trial expiry.
  */
-const upgradeToBillable = async (clientId, callerClientIds, plan) => {
+const upgradeToBillable = async (clientId, callerClientIds) => {
   if (!callerClientIds.includes(clientId)) {
     const err = new Error('Access denied');
     err.status = 403;
     throw err;
   }
-
-  const days = PLAN_DAYS[plan];
-  if (!days) {
-    const err = new Error('plan must be 3months, 6months or 1year');
-    err.status = 400;
-    throw err;
-  }
-
   const client = await User.findByPk(clientId);
   if (!client) {
     const err = new Error('Client not found');
     err.status = 404;
     throw err;
   }
-
-  const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-
   await client.update({ accountType: 'billable', trialExpiresAt: null });
-
-  await Vehicle.update(
-    { subscriptionExpiresAt: expiresAt },
-    { where: { clientId, status: { [Op.ne]: 'deleted' } } }
-  );
-
-  return { accountType: 'billable', subscriptionExpiresAt: expiresAt, plan };
+  return { accountType: 'billable' };
 };
 
 /**

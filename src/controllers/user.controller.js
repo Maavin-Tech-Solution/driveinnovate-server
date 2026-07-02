@@ -194,11 +194,7 @@ const upgradeClient = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only papa or dealer can upgrade accounts.' });
     }
     const clientId = Number(req.params.clientId);
-    const { plan } = req.body;
-    if (!plan) {
-      return res.status(400).json({ success: false, message: 'plan is required' });
-    }
-    const result = await userService.upgradeToBillable(clientId, req.user.clientIds, plan);
+    const result = await userService.upgradeToBillable(clientId, req.user.clientIds);
     return res.json({ success: true, message: 'Account upgraded to billable', data: result });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

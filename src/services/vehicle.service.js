@@ -892,6 +892,15 @@ const addVehicle = async (clientId, { vehicleNumber, vehicleName, chasisNumber, 
     }
   }
 
+  if (imei) {
+    const dupImei = await Vehicle.findOne({ where: { imei, status: { [Op.ne]: 'deleted' } } });
+    if (dupImei) {
+      const err = new Error('A vehicle with this IMEI is already registered');
+      err.status = 409;
+      throw err;
+    }
+  }
+
   const user = await User.findByPk(clientId);
   // If user has a parent, use that; otherwise use the user's own ID (they are the parent)
   const parentId = user?.parentId || clientId;

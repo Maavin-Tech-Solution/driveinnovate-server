@@ -1,7 +1,8 @@
 const vehicleService = require('../services/vehicle.service');
 const { buildVehicleScope } = require('../utils/vehicleScope');
 const { getSystemSettings } = require('../services/master.service');
-const { User } = require('../models');
+const { User, Vehicle } = require('../models');
+const { Op } = require('sequelize');
 
 /**
  * GET /api/vehicles
@@ -61,12 +62,22 @@ const addVehicle = async (req, res) => {
       effectiveClientId = targetId;
     }
 
+    const settings = await getSystemSettings();
+    const owner = await User.findByPk(effectiveClientId, { attributes: ['billingType', 'accountType'] });
+
+    // Trial accounts are capped at trialVehicleLimit vehicles.
+    if (owner?.accountType === 'trial') {
+      const limit = Number(settings.trialVehicleLimit) || 10;
+      const count = await Vehicle.count({ where: { clientId: effectiveClientId, status: { [Op.ne]: 'deleted' } } });
+      if (count >= limit) {
+        return res.status(403).json({ success: false, message: `Trial accounts are limited to ${limit} vehicles. Upgrade to billable to add more.` });
+      }
+    }
+
     // A vehicle add spends 1 token ONLY when the module is on network-wide AND the
     // owning client is billable + prepaid (trial = free testing). Server-enforced.
-    const { billingEnabled } = await getSystemSettings();
     let consumeToken = false;
-    if (billingEnabled) {
-      const owner = await User.findByPk(effectiveClientId, { attributes: ['billingType', 'accountType'] });
+    if (settings.billingEnabled) {
       consumeToken = owner?.billingType === 'prepaid' && owner?.accountType === 'billable';
     }
     const vehicle = await vehicleService.addVehicle(

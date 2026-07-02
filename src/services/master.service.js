@@ -339,7 +339,8 @@ const { SystemSetting } = require('../models');
 const DEFAULT_SETTINGS = {
   liveShareEnabled:    false,
   trialAccountEnabled: false,
-  trialDurationDays:   30,
+  trialDurationDays:   5,
+  trialVehicleLimit:   10,
   billingEnabled:      false,
   defaultMonthlyPrice: 0,
   defaultTaxPercent:   0,
@@ -356,7 +357,8 @@ const getSystemSettings = async () => {
   return {
     liveShareEnabled:    Boolean(row.liveShareEnabled),
     trialAccountEnabled: Boolean(row.trialAccountEnabled),
-    trialDurationDays:   Number(row.trialDurationDays) || 30,
+    trialDurationDays:   Number(row.trialDurationDays) || 5,
+    trialVehicleLimit:   Number(row.trialVehicleLimit) || 10,
     billingEnabled:      Boolean(row.billingEnabled),
     defaultMonthlyPrice: Number(row.defaultMonthlyPrice) || 0,
     defaultTaxPercent:   Number(row.defaultTaxPercent) || 0,
@@ -369,7 +371,7 @@ const getSystemSettings = async () => {
  */
 const updateSystemSettings = async (updates) => {
   const boolKeys = ['liveShareEnabled', 'trialAccountEnabled', 'billingEnabled'];
-  const intKeys  = ['trialDurationDays'];
+  const intKeys  = ['trialDurationDays', 'trialVehicleLimit'];
   const decimalKeys = ['defaultMonthlyPrice', 'defaultTaxPercent'];
   const safe = {};
   for (const k of boolKeys) {
