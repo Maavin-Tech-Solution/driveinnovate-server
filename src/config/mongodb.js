@@ -68,7 +68,7 @@ const locationSchema = new mongoose.Schema({
   imei: { type: String, required: true },
   deviceId: String,
   deviceModel: String,
-  timestamp: { type: Date, index: true },
+  timestamp: { type: Date },
   raw: String,
   packetType: String,
   protocol: String,
@@ -99,6 +99,8 @@ const locationSchema = new mongoose.Schema({
 // Note: These are defined for schema reference but created via mongodb-indexes.js script
 locationSchema.index({ imei: 1, timestamp: -1 }); // For latest location queries (sync)
 locationSchema.index({ imei: 1, timestamp: 1 });  // For range queries (location player)
+// REQUIRED — backs "latest packet of type X per vehicle" (fetchComprehensiveDeviceStatus).
+locationSchema.index({ imei: 1, packetType: 1, timestamp: -1 });
 
 const Location = mongoose.model('Location', locationSchema);
 
@@ -106,7 +108,7 @@ const Location = mongoose.model('Location', locationSchema);
 const fmb125LocationSchema = new mongoose.Schema({
   imei: { type: String, required: true },
   deviceType: { type: String, default: 'FMB125' },
-  timestamp: { type: Date, index: true },
+  timestamp: { type: Date },
   serverTimestamp: Date,
   priority: Number,
   // GPS fields
@@ -197,7 +199,7 @@ const ais140LocationSchema = new mongoose.Schema({
   packetType:       String,   // LGN | NMR | HBT | EMG | ALT
   packetStatus:     String,   // L (live) | H (history)
   replyNumber:      Number,
-  timestamp:        { type: Date, index: true },
+  timestamp:        { type: Date },
   // GPS
   latitude:         Number,
   longitude:        Number,
@@ -242,6 +244,8 @@ const ais140LocationSchema = new mongoose.Schema({
 
 ais140LocationSchema.index({ imei: 1, timestamp: -1 });
 ais140LocationSchema.index({ imei: 1, timestamp: 1 });
+// REQUIRED — backs latest-EMG / latest-per-type queries (fetchAIS140Status).
+ais140LocationSchema.index({ imei: 1, packetType: 1, timestamp: -1 });
 
 const AIS140Location = mongoose.model('AIS140Location', ais140LocationSchema);
 

@@ -44,7 +44,9 @@ const toggleGeofence = async (req, res) => {
 
 const addAssignment = async (req, res) => {
   try {
-    const data = await geofenceService.addAssignment(req.params.id, req.user.id, req.body);
+    // Geofence is scoped to the caller (req.user.id); the vehicle/group being
+    // assigned may belong to any client in the caller's network (clientIds).
+    const data = await geofenceService.addAssignment(req.params.id, req.user.id, req.body, req.user.clientIds);
     return res.status(201).json({ success: true, message: 'Assignment added successfully', data });
   } catch (err) { return res.status(err.status || 500).json({ success: false, message: err.message }); }
 };

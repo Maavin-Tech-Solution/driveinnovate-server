@@ -59,13 +59,10 @@ async function createIndexes() {
         name: 'imei_timestamp_asc',
         background: true,
         description: 'For range queries in chronological order (location player)'
-      },
-      {
-        keys: { timestamp: 1 },
-        name: 'timestamp',
-        background: true,
-        description: 'For date range queries'
       }
+      // NOTE: a standalone { timestamp: 1 } index was intentionally removed —
+      // every packet query filters on imei first, so it backed no query and only
+      // cost storage + write throughput.
     ];
     
     let created = 0;

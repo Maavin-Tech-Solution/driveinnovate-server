@@ -180,7 +180,7 @@ const toggleGeofence = async (id, clientId) => {
 // Assignments
 // ─────────────────────────────────────────────────────────────────────────────
 
-const addAssignment = async (geofenceId, clientId, data) => {
+const addAssignment = async (geofenceId, clientId, data, clientIds = null) => {
   // Verify the geofence belongs to this client
   const geo = await Geofence.findOne({ where: { id: geofenceId, clientId } });
   if (!geo) {
@@ -188,6 +188,10 @@ const addAssignment = async (geofenceId, clientId, data) => {
     err.status = 404;
     throw err;
   }
+
+  // The vehicle/group may be owned by any client in the caller's network
+  // (papa/dealer manage downstream fleets), not just the caller directly.
+  const ownerScope = (Array.isArray(clientIds) && clientIds.length) ? clientIds : [clientId];
 
   const { scope, vehicleId, groupId, alertOnEntry, alertOnExit } = data;
 
@@ -203,8 +207,8 @@ const addAssignment = async (geofenceId, clientId, data) => {
       err.status = 400;
       throw err;
     }
-    // Verify vehicle belongs to same client
-    const vehicle = await Vehicle.findOne({ where: { id: vehicleId, clientId } });
+    // Verify vehicle is within the caller's network
+    const vehicle = await Vehicle.findOne({ where: { id: vehicleId, clientId: ownerScope } });
     if (!vehicle) {
       const err = new Error('Vehicle not found');
       err.status = 404;
@@ -225,7 +229,7 @@ const addAssignment = async (geofenceId, clientId, data) => {
       err.status = 400;
       throw err;
     }
-    const group = await VehicleGroup.findOne({ where: { id: groupId, clientId } });
+    const group = await VehicleGroup.findOne({ where: { id: groupId, clientId: ownerScope } });
     if (!group) {
       const err = new Error('Group not found');
       err.status = 404;
