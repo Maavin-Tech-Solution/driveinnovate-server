@@ -26,6 +26,7 @@ const MIGRATIONS = [
   { table: 'vehicle_device_states', column: 'last_external_voltage', ddl: 'DECIMAL(5,2) NULL COMMENT "Vehicle 12V supply V"' },
   { table: 'vehicle_device_states', column: 'last_gsm_signal',       ddl: 'TINYINT UNSIGNED NULL COMMENT "GSM signal strength"' },
   { table: 'vehicle_device_states', column: 'last_gps_packet_time',  ddl: 'DATETIME(6) NULL COMMENT "Time of last GPS-bearing packet"' },
+  { table: 'vehicle_device_states', column: 'last_gps_seen_at',      ddl: 'DATETIME(6) NULL COMMENT "Real server UTC when last GPS-bearing packet processed — clock-immune GPS recency (never compare device time to server clock)"' },
   { table: 'vehicle_device_states', column: 'speed_zero_since',      ddl: 'DATETIME(6) NULL COMMENT "When speed last became 0; cleared on speed>0. Drives Idle 4-min rule"' },
   { table: 'vehicle_device_states', column: 'running_streak',        ddl: 'TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT "Consecutive packets with speed>5. Drives Running 3-packets rule"' },
   { table: 'vehicle_device_states', column: 'first_seen_at', ddl: 'DATETIME NULL COMMENT "Real server UTC when the first packet was ever processed"' },
@@ -88,6 +89,8 @@ const MIGRATIONS = [
 
   // ── Billing module: system_settings (camelCase — SystemSetting has no underscored) ──
   { table: 'system_settings', column: 'billingEnabled',      ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Master switch for the prepaid billing module"' },
+  { table: 'system_settings', column: 'tokenValidityMonths', ddl: 'INT NOT NULL DEFAULT 1 COMMENT "Months of validity one token grants a vehicle"' },
+  { table: 'di_user',         column: 'auto_renew',          ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Client opt-in: auto-renew vehicles from wallet on expiry"' },
   { table: 'system_settings', column: 'defaultMonthlyPrice', ddl: 'DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT "Network fallback per-vehicle monthly price (coins/₹)"' },
   { table: 'system_settings', column: 'defaultTaxPercent',   ddl: 'DECIMAL(5,2) NOT NULL DEFAULT 0 COMMENT "Default GST/tax % on invoices"' },
 

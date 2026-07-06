@@ -131,6 +131,10 @@ const VehicleDeviceState = sequelize.define('VehicleDeviceState', {
     type: DataTypes.DATE, allowNull: true, field: 'last_gps_packet_time',
     comment: 'Time of last packet that carried real GPS coordinates — used for alert staleness and gap detection',
   },
+  lastGpsSeenAt: {
+    type: DataTypes.DATE, allowNull: true, field: 'last_gps_seen_at',
+    comment: 'Real server UTC when the last GPS-bearing packet was processed. Clock-immune GPS-recency signal: lastGpsPacketTime is DEVICE time (GT06 can be timezone-skewed), so it must never be compared against the server clock in the STATUS-ignition guard.',
+  },
 }, {
   tableName: 'vehicle_device_states',
   timestamps: true,

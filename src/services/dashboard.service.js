@@ -19,8 +19,8 @@ const getStats = async (scope) => {
   // Subscription lifecycle counts (token billing). Actual expiry = paid term end;
   // grace expiry = actual + grace days; vehicle stays usable until grace expiry.
   const nowMs = Date.now();
-  const in30 = nowMs + 30 * 24 * 60 * 60 * 1000;
-  let subscriptionExpiringSoon = 0; // actual expiry within next 30 days, still active
+  const in7 = nowMs + 7 * 24 * 60 * 60 * 1000;
+  let subscriptionExpiringSoon = 0; // actual expiry within next 7 days, still active
   let subscriptionInGrace = 0;       // past actual expiry but within grace
   let subscriptionExpired = 0;       // past grace expiry
   for (const v of vehicles) {
@@ -30,7 +30,7 @@ const getStats = async (scope) => {
     const grace = v.graceExpiresAt ? new Date(v.graceExpiresAt).getTime() : actual;
     if (grace < nowMs) subscriptionExpired++;
     else if (actual < nowMs) subscriptionInGrace++;
-    else if (actual <= in30) subscriptionExpiringSoon++;
+    else if (actual <= in7) subscriptionExpiringSoon++;
   }
 
   const [totalChallans, pendingChallans, challanAmountResult, vehicleRenewals] = await Promise.all([

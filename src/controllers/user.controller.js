@@ -37,8 +37,8 @@ const getParentContact = async (req, res) => {
  */
 const updateProfile = async (req, res) => {
   try {
-    const { name, phone } = req.body;
-    const updated = await userService.updateProfile(req.user.id, { name, phone });
+    const { name, phone, autoRenew } = req.body;
+    const updated = await userService.updateProfile(req.user.id, { name, phone, autoRenew });
     return res.json({ success: true, message: 'Profile updated successfully', data: updated });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

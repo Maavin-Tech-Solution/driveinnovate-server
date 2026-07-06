@@ -7,10 +7,9 @@ const {
 const { getSystemSettings } = require('./master.service');
 
 // ─── Token billing model ─────────────────────────────────────────────────────
-// The wallet holds VEHICLE TOKENS (whole numbers). 1 token = 1 vehicle for 1
-// year. The billing cycle is fixed at 1 year, so adding/renewing a vehicle costs
-// exactly 1 token and extends billed-till by 12 months.
-const SUBSCRIPTION_MONTHS = 12;
+// The wallet holds VEHICLE TOKENS (whole numbers). Spending 1 token grants a
+// vehicle `tokenValidityMonths` of validity (default 1 month, configurable in
+// System Settings) + the client's grace days.
 const TOKENS_PER_VEHICLE = 1;
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -224,7 +223,9 @@ const activateOrRenew = async ({ actor, vehicle, type, transaction }) => {
     const cur = vehicle.subscriptionExpiresAt ? new Date(vehicle.subscriptionExpiresAt) : null;
     periodStart = cur && cur > now ? cur : now;
   }
-  const actualExpiry = addMonths(periodStart, SUBSCRIPTION_MONTHS);
+  const settings = await getSystemSettings();
+  const validityMonths = Number(settings.tokenValidityMonths) || 1;
+  const actualExpiry = addMonths(periodStart, validityMonths);
 
   // 3. GRACE expiry = actual + the client's grace days (set at account creation).
   const graceDays = await resolveGraceDays(clientId, transaction);
@@ -258,6 +259,22 @@ const renewVehicle = async ({ actor, vehicleId }) => {
       subscriptionExpiresAt: result.periodEnd,
       graceExpiresAt: result.graceExpiry,
     };
+  });
+};
+
+/**
+ * Auto-renew a vehicle from the nightly job (no actor / access check). Spends 1
+ * token; throws INSUFFICIENT_FUNDS when the wallet is empty. Only billable+prepaid
+ * clients are eligible.
+ */
+const autoRenewVehicle = async (vehicleId) => {
+  return sequelize.transaction(async (t) => {
+    const vehicle = await Vehicle.findOne({ where: { id: vehicleId }, lock: t.LOCK.UPDATE, transaction: t });
+    if (!vehicle) throw httpError('Vehicle not found', 404);
+    const owner = await User.findByPk(vehicle.clientId, { attributes: ['billingType', 'accountType'], transaction: t });
+    if (owner?.billingType !== 'prepaid' || owner?.accountType !== 'billable') throw httpError('Not eligible for token renewal', 400);
+    const result = await activateOrRenew({ actor: null, vehicle, type: 'RENEWAL', transaction: t });
+    return { subscriptionExpiresAt: result.periodEnd, graceExpiresAt: result.graceExpiry, balanceAfter: result.balanceAfter };
   });
 };
 
@@ -380,7 +397,7 @@ const transferCoins = async ({ actor, toUserId, vehicles, unitPrice, note }) => 
       vehicleId: null,
       vehicleCount: count,
       cycle: 'YEARLY',
-      cycleMonths: SUBSCRIPTION_MONTHS,
+      cycleMonths: 1,
       periodStart: null,
       periodEnd: null,
       monthlyPrice: money.unitPrice,
@@ -588,7 +605,6 @@ const updateBillingSettings = async (user, { gstin, invoiceTaxPercent, invoicePr
 };
 
 module.exports = {
-  SUBSCRIPTION_MONTHS,
   TOKENS_PER_VEHICLE,
   adjustWallet,
   resolveRate,
@@ -598,6 +614,7 @@ module.exports = {
   quoteRecharge,
   activateOrRenew,
   renewVehicle,
+  autoRenewVehicle,
   setVehicleExpiry,
   mintCoins,
   transferCoins,

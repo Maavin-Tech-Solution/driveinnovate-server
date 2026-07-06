@@ -64,6 +64,14 @@ const User = sequelize.define(
       defaultValue: 'postpaid',
       field: 'billing_type',
     },
+    // Client opt-in: when ON and the wallet has tokens, the nightly job renews
+    // vehicles as they reach expiry instead of letting them lapse.
+    autoRenew: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      field: 'auto_renew',
+    },
     // Extra days added beyond the 1-year token term for this client's vehicles.
     // Set at account creation (grace period).
     graceDays: {

@@ -25,6 +25,9 @@ const SystemSetting = sequelize.define('SystemSetting', {
   /** Master switch — when false the prepaid billing module is hidden/disabled */
   billingEnabled: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
 
+  /** Months of validity one token grants a vehicle (default 1) */
+  tokenValidityMonths: { type: DataTypes.INTEGER, defaultValue: 1, allowNull: false },
+
   /** Network-wide fallback monthly price (coins/₹) per vehicle when a client has no explicit BillingRate */
   defaultMonthlyPrice: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0, allowNull: false },
 

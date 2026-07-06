@@ -1411,6 +1411,14 @@ const getLivePositions = async (scope /*, since */) => {
     console.warn('[livePositions] MongoDB overlay failed, falling back to MySQL state:', e.message);
   }
 
+  // Ignition reading straight from a raw MongoDB doc (the GPS overlay).
+  // AIS140/FMB expose an `ignition` field; GT06 exposes the ACC bit as `acc`.
+  const _accFromDoc = (d) =>
+    d == null            ? null
+    : d.ignition != null ? Boolean(Number(d.ignition))
+    : d.acc != null      ? Boolean(d.acc)
+    : null;
+
   const out = vehicles.map(v => {
     const s = stateMap.get(v.id) || {};
     const m = latest.get(_imeiKey(v.imei)); // newest GPS fix (fresh) or undefined
@@ -1424,12 +1432,52 @@ const getLivePositions = async (scope /*, since */) => {
     // Indian Ocean / Southern hemisphere.
     if (lat != null) lat = Math.abs(lat);
     if (lng != null) lng = Math.abs(lng);
-    const speed = m ? (m.speed != null ? Number(m.speed) : 0) : (s.lastSpeed ?? null);
-    const engineOn = m
-      ? (m.ignition != null ? Boolean(Number(m.ignition)) : (m.acc != null ? Boolean(m.acc) : (s.engineOn ?? false)))
-      : (s.engineOn ?? false);
-    // "Last heard" = MongoDB server insert time (fresh) over the lagging state row.
-    const lastSeenAt = (m && (m.createdAt || m.serverTimestamp)) || s.lastSeenAt || null;
+    // ── Freshness + ignition must reflect EVERY packet type, not just GPS ──────
+    // `m` is only the newest GPS-BEARING fix. A parked/stopped vehicle stops
+    // emitting GPS LOCATION packets but keeps sending STATUS / HEARTBEAT / LOGIN /
+    // INFO packets — which still carry the true ignition (ACC) bit and prove the
+    // device is alive. So `m` can be an hour stale while the vehicle is very much
+    // online and its ignition has since switched OFF. The VehicleDeviceState row
+    // `s` IS updated by the change-stream pipeline for ALL packet types, in real
+    // server-UTC (lastSeenAt) with a properly-resolved engineOn (STATUS ACC
+    // reconciled against GPS motion). So pick whichever of {state row, GPS
+    // overlay} is FRESHER — never blindly prefer the GPS fix. (Mirrors
+    // getVehicleById, which already trusts the state row for these fields.)
+    //
+    // Freshness MUST be compared on server-UTC insert/process time only. Device
+    // event times (m.timestamp / s.lastPacketTime) are unusable here: these GT06s
+    // send local IST parsed as UTC (GT06_TZ_OFFSET_MIN=0), so they run ~5.5 h in
+    // the FUTURE and would always win a naive comparison.
+    const sSeenMs = s.lastSeenAt ? new Date(s.lastSeenAt).getTime() : -Infinity;
+    const mSeenMs = (m && (m.createdAt || m.serverTime || m.serverTimestamp))
+      ? new Date(m.createdAt || m.serverTime || m.serverTimestamp).getTime()
+      : -Infinity;
+
+    // Speed comes from the GPS overlay, but a GPS fix older than STALE_GPS_MS is
+    // no longer evidence of CURRENT motion: GT06/AIS140/FMB all report GPS every
+    // few seconds while driving and fall back to STATUS/HEARTBEAT-only once parked.
+    // A vehicle that lost GPS mid-drive (basement/tunnel) then parked would keep
+    // its last >5 km/h reading forever and show as "Running" on the map — even
+    // though the state machine already resolved it to engine-off/Stopped (it
+    // clears runningStreak on a stale-GPS STATUS-off). Zero the stale speed so the
+    // client's documented assumption ("the live feed nulls speed once the GPS fix
+    // goes stale") actually holds and the vehicle settles to Stopped.
+    const STALE_GPS_MS = 5 * 60_000; // mirrors packetProcessor TRIP_GPS_GAP_MS
+    const gpsStale = mSeenMs !== -Infinity && (Date.now() - mSeenMs) > STALE_GPS_MS;
+    const speed = m
+      ? (gpsStale ? 0 : (m.speed != null ? Number(m.speed) : 0))
+      : (s.lastSpeed ?? null);
+
+    const stateIsFresher = sSeenMs >= mSeenMs;
+
+    const engineOn = stateIsFresher
+      ? (s.engineOn != null ? Boolean(s.engineOn) : (_accFromDoc(m) ?? false))
+      : (_accFromDoc(m) ?? (s.engineOn != null ? Boolean(s.engineOn) : false));
+
+    // "Last heard" = freshest real-UTC signal from either source.
+    const lastSeenAt = (sSeenMs === -Infinity && mSeenMs === -Infinity)
+      ? null
+      : new Date(Math.max(sSeenMs, mSeenMs));
 
     return {
       id:             v.id,
@@ -1443,7 +1491,12 @@ const getLivePositions = async (scope /*, since */) => {
       registeredAt:   v.createdAt ?? null,
       speedZeroSince: s.speedZeroSince ?? null,
       engineOffSince: s.engineOffSince ?? null,
-      runningStreak:  s.runningStreak ?? 0,
+      // Same stale-GPS gate as speed: a runningStreak is only "moving" evidence
+      // while GPS is live. Once the fix is >5 min stale (real UTC) the streak is
+      // frozen (it only decays in the GPS branch) and must not keep the vehicle
+      // "Running" — this also backstops the packetProcessor STATUS guard if a
+      // device's LOCATION clock skews its GPS-recency check.
+      runningStreak:  gpsStale ? 0 : (s.runningStreak ?? 0),
       movement:       s.lastMovement ?? null,
     };
   });

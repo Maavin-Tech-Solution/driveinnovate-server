@@ -138,9 +138,16 @@ function normalizeGT06(doc) {
 
     fuel:            null,
     odometer:        null,
-    battery:         doc.battery != null ? parseFloat(doc.battery) : null,
+    // The GT06 TCP server saves the internal-battery level as `batteryLevel` and
+    // the GSM strength as `gsmSignal` (STATUS 0x13 / HEARTBEAT 0x23).  Reading
+    // `doc.battery`/`doc.gsm` (which the device never writes) meant GT06 battery
+    // and signal telemetry never reached the state row.  Read the real fields,
+    // keeping the old names as a fallback for any legacy documents.
+    battery:         doc.batteryLevel != null ? parseFloat(doc.batteryLevel)
+                     : (doc.battery != null ? parseFloat(doc.battery) : null),
     externalVoltage: null,
-    gsmSignal:       doc.gsm != null ? parseInt(doc.gsm, 10) : null,
+    gsmSignal:       doc.gsmSignal != null ? parseInt(doc.gsmSignal, 10)
+                     : (doc.gsm != null ? parseInt(doc.gsm, 10) : null),
 
     packetType:  doc.packetType || null,
     ioElements:  null,

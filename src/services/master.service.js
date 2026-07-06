@@ -342,6 +342,7 @@ const DEFAULT_SETTINGS = {
   trialDurationDays:   5,
   trialVehicleLimit:   10,
   billingEnabled:      false,
+  tokenValidityMonths: 1,
   defaultMonthlyPrice: 0,
   defaultTaxPercent:   0,
 };
@@ -360,6 +361,7 @@ const getSystemSettings = async () => {
     trialDurationDays:   Number(row.trialDurationDays) || 5,
     trialVehicleLimit:   Number(row.trialVehicleLimit) || 10,
     billingEnabled:      Boolean(row.billingEnabled),
+    tokenValidityMonths: Number(row.tokenValidityMonths) || 1,
     defaultMonthlyPrice: Number(row.defaultMonthlyPrice) || 0,
     defaultTaxPercent:   Number(row.defaultTaxPercent) || 0,
   };
@@ -371,7 +373,7 @@ const getSystemSettings = async () => {
  */
 const updateSystemSettings = async (updates) => {
   const boolKeys = ['liveShareEnabled', 'trialAccountEnabled', 'billingEnabled'];
-  const intKeys  = ['trialDurationDays', 'trialVehicleLimit'];
+  const intKeys  = ['trialDurationDays', 'trialVehicleLimit', 'tokenValidityMonths'];
   const decimalKeys = ['defaultMonthlyPrice', 'defaultTaxPercent'];
   const safe = {};
   for (const k of boolKeys) {

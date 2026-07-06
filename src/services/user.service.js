@@ -31,14 +31,18 @@ const getParentContact = async (userId) => {
   return { name: parent.name, email: parent.email, phone: parent.phone };
 };
 
-const updateProfile = async (userId, { name, phone }) => {
+const updateProfile = async (userId, { name, phone, autoRenew }) => {
   const user = await User.findByPk(userId);
   if (!user) {
     const err = new Error('User not found');
     err.status = 404;
     throw err;
   }
-  await user.update({ name, phone });
+  const updates = {};
+  if (name !== undefined) updates.name = name;
+  if (phone !== undefined) updates.phone = phone;
+  if (autoRenew !== undefined) updates.autoRenew = !!autoRenew;
+  await user.update(updates);
   const { password: _, ...updated } = user.toJSON();
   return updated;
 };
@@ -291,6 +295,16 @@ const buildClientTree = async (parentId, depth = 0) => {
   const vcMap = Object.fromEntries(vcRows.map(r => [r.clientId, Number(r.cnt)]));
   const memberVcMap = await _memberVehicleCounts(clients.filter(c => c.kind === 'member').map(c => c.id));
 
+  // Vehicles whose ACTUAL expiry is within the next 7 days (still active), per client.
+  const in7 = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const expRows = await Vehicle.findAll({
+    where: { clientId: ids, status: 'active', subscriptionExpiresAt: { [Op.gt]: new Date(), [Op.lte]: in7 } },
+    attributes: ['clientId', [fn('COUNT', col('id')), 'cnt']],
+    group: ['clientId'],
+    raw: true,
+  });
+  const expMap = Object.fromEntries(expRows.map(r => [r.clientId, Number(r.cnt)]));
+
   // Recursively build children for each client in parallel
   const result = await Promise.all(
     clients.map(async (c) => {
@@ -299,10 +313,15 @@ const buildClientTree = async (parentId, depth = 0) => {
       const ownCount = c.kind === 'member' ? (memberVcMap[c.id] || 0) : (vcMap[c.id] || 0);
       const networkVehicleCount = ownCount +
         children.reduce((s, ch) => s + (ch.networkVehicleCount || 0), 0);
+      const ownExpiring = c.kind === 'member' ? 0 : (expMap[c.id] || 0);
+      const networkExpiringSoon = ownExpiring +
+        children.reduce((s, ch) => s + (ch.networkExpiringSoon || 0), 0);
       return {
         ...c.toJSON(),
         vehicleCount: ownCount,
         networkVehicleCount,
+        expiringSoon: ownExpiring,
+        networkExpiringSoon,
         children,
       };
     })

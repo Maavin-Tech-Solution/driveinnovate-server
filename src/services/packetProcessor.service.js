@@ -442,11 +442,39 @@ async function processPacketInner(doc, deviceType, _state) {
           caps,
           prevIgnition
         );
-        const vehicleIsMoving = (state.runningStreak || 0) > 0;
+        // "Moving" must be backed by RECENT GPS, not just a non-zero
+        // runningStreak.  runningStreak only decays in the GPS branch below,
+        // which never runs once a vehicle parks and the device falls back to
+        // STATUS/HEARTBEAT-only packets — so on its own it stays >0 forever and
+        // a parked vehicle's STATUS "ACC off" is ignored, leaving ignition stuck
+        // ON indefinitely.  Require a GPS fix within the last TRIP_GPS_GAP_MS for
+        // the "don't trust STATUS-off while driving" guard to apply.
+        //
+        // Recency is measured on the SERVER clock (lastGpsSeenAt, real UTC),
+        // NEVER the device clock (lastGpsPacketTime).  GT06 stamps LOCATION with
+        // device-local time but STATUS with server `new Date()`; mixing the two
+        // (now[server] − lastGpsPacketTime[device]) yields a wildly negative gap
+        // for timezone-skewed devices → gpsRecent stuck true → the very bug this
+        // guard fixes.  A null lastGpsSeenAt (no GPS since deploy / parked) →
+        // Infinity → gpsRecent false → STATUS-off is trusted, the safe default.
+        const gpsGapMs = state.lastGpsSeenAt
+          ? (Date.now() - new Date(state.lastGpsSeenAt).getTime())
+          : Infinity;
+        const gpsRecent = gpsGapMs < TRIP_GPS_GAP_MS;
+        const vehicleIsMoving = gpsRecent && (state.runningStreak || 0) > 0;
         if (ignFromStatus === true || !vehicleIsMoving) {
-          // Apply update: engine turning ON → always trust.
-          // Engine turning OFF → only trust when GPS motion confirms vehicle stopped.
+          // Engine turning ON → always trust.
+          // Engine turning OFF → trust when GPS motion confirms stopped OR when
+          // GPS has gone silent (vehicle parked, no LOCATION packets to decay the
+          // streak).
           state.engineOn = ignFromStatus;
+          // Parked + engine off → clear the stale "moving" bookkeeping so the
+          // fleet state resolves to Stopped and later packets see a clean state.
+          if (ignFromStatus === false && !gpsRecent) {
+            state.runningStreak  = 0;
+            if (!state.engineOffSince) state.engineOffSince = pkt.timestamp;
+            if (!state.speedZeroSince) state.speedZeroSince = pkt.timestamp;
+          }
         }
       }
 
@@ -880,6 +908,11 @@ async function processPacketInner(doc, deviceType, _state) {
     // device".  Unlike updatedAt it is NOT bumped by reconcileStaleTrips.
     // Unlike lastPacketTime it is NOT subject to device-clock timezone errors.
     state.lastSeenAt        = new Date();
+    // Server-UTC stamp specifically for the last GPS-BEARING packet (this branch
+    // only runs for packets with real coordinates).  The STATUS-ignition guard
+    // compares this against the server clock to decide "is the vehicle still
+    // driving?" — see the gpsRecent note in the isStatusOnly branch above.
+    state.lastGpsSeenAt     = state.lastSeenAt;
     // Record the very first packet time — never overwrite once set
     if (!state.firstSeenAt) state.firstSeenAt = state.lastSeenAt;
     state.currentTripId     = state.currentTripId    || null;
@@ -1205,6 +1238,7 @@ async function reprocessVehicle(vehicleId, { from = null, to = null } = {}) {
       lastLat: null,
       lastLng: null,
       lastGpsPacketTime: null,
+      lastGpsSeenAt: null,
       lastSpeed: null,
       speedZeroSince: null,
       runningStreak: 0,
