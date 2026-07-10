@@ -64,6 +64,7 @@ const MIGRATIONS = [
   // ── Per-account brand logo (sidebar branding after login) ────────────────
   { table: 'di_user', column: 'logo_url',            ddl: 'VARCHAR(500) NULL COMMENT "Per-account brand logo URL; replaces default sidebar mark after login"' },
   { table: 'di_user', column: 'logo_bg_color',       ddl: 'VARCHAR(20) NULL COMMENT "Background color behind the sidebar logo (hex); null = transparent"' },
+  { table: 'di_user', column: 'brand_text',          ddl: 'JSON NULL COMMENT "Sidebar brand text lines with per-line styling { title:{text,color,size,font}, subtitle:{...} }; blank when unset"' },
 
   // ── SmartChallan integration settings ────────────────────────────────────
   { table: 'di_user', column: 'sc_enabled',          ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Master toggle for SmartChallan integration\"" },

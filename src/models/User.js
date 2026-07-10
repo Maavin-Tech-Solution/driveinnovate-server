@@ -86,6 +86,12 @@ const User = sequelize.define(
     // Optional background color behind that logo in the sidebar (hex). null =
     // transparent (blends with the dark sidebar).
     logoBgColor: { type: DataTypes.STRING(20), allowNull: true, field: 'logo_bg_color' },
+    // Optional sidebar brand text lines with per-line styling. Shown ONLY when a
+    // line's text is set — no default "DriveInnovate" / "Fleet Management"
+    // fallback (blank when unset). Shape:
+    //   { title:    { text, color, size, font },
+    //     subtitle: { text, color, size, font } }
+    brandText: { type: DataTypes.JSON, allowNull: true, field: 'brand_text' },
     // SmartChallan integration
     scEnabled:        { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_enabled' },
     scUsername:       { type: DataTypes.STRING(255), allowNull: true, field: 'sc_username' },

@@ -31,7 +31,30 @@ const getParentContact = async (userId) => {
   return { name: parent.name, email: parent.email, phone: parent.phone };
 };
 
-const updateProfile = async (userId, { name, phone, autoRenew, logoUrl, logoBgColor }) => {
+// Coerce a brand-text payload into a safe, fixed shape. Each line keeps text +
+// styling only when its text is non-empty; when neither line has text the whole
+// thing collapses to null so the sidebar renders blank.
+const sanitizeBrandText = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const line = (l) => {
+    l = l && typeof l === 'object' ? l : {};
+    const text = String(l.text || '').trim().slice(0, 160);
+    if (!text) return null;
+    const size = Number(l.size);
+    return {
+      text,
+      color: String(l.color || '').trim().slice(0, 40) || null,
+      size: Number.isFinite(size) ? Math.min(48, Math.max(8, Math.round(size))) : null,
+      font: String(l.font || '').trim().slice(0, 80) || null,
+    };
+  };
+  const title = line(raw.title);
+  const subtitle = line(raw.subtitle);
+  if (!title && !subtitle) return null;
+  return { title, subtitle };
+};
+
+const updateProfile = async (userId, { name, phone, autoRenew, logoUrl, logoBgColor, brandText }) => {
   const user = await User.findByPk(userId);
   if (!user) {
     const err = new Error('User not found');
@@ -46,6 +69,9 @@ const updateProfile = async (userId, { name, phone, autoRenew, logoUrl, logoBgCo
   if (logoUrl !== undefined) updates.logoUrl = (logoUrl || '').trim() || null;
   // Empty string clears the logo background (transparent).
   if (logoBgColor !== undefined) updates.logoBgColor = (logoBgColor || '').trim() || null;
+  // Sidebar brand text lines with per-line styling. Sanitise into a fixed shape;
+  // store null when both lines are empty so the sidebar stays blank.
+  if (brandText !== undefined) updates.brandText = sanitizeBrandText(brandText);
   await user.update(updates);
   const { password: _, ...updated } = user.toJSON();
   return updated;
