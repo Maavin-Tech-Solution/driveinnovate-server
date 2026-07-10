@@ -31,7 +31,7 @@ const getParentContact = async (userId) => {
   return { name: parent.name, email: parent.email, phone: parent.phone };
 };
 
-const updateProfile = async (userId, { name, phone, autoRenew, logoUrl }) => {
+const updateProfile = async (userId, { name, phone, autoRenew, logoUrl, logoBgColor }) => {
   const user = await User.findByPk(userId);
   if (!user) {
     const err = new Error('User not found');
@@ -44,6 +44,8 @@ const updateProfile = async (userId, { name, phone, autoRenew, logoUrl }) => {
   if (autoRenew !== undefined) updates.autoRenew = !!autoRenew;
   // Empty string clears the logo (revert to the default sidebar mark).
   if (logoUrl !== undefined) updates.logoUrl = (logoUrl || '').trim() || null;
+  // Empty string clears the logo background (transparent).
+  if (logoBgColor !== undefined) updates.logoBgColor = (logoBgColor || '').trim() || null;
   await user.update(updates);
   const { password: _, ...updated } = user.toJSON();
   return updated;

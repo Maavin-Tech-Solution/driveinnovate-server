@@ -83,6 +83,9 @@ const User = sequelize.define(
     // Optional per-account brand logo (URL). When set, it replaces the default
     // DriveInnovate mark in the sidebar for this account after login.
     logoUrl: { type: DataTypes.STRING(500), allowNull: true, field: 'logo_url' },
+    // Optional background color behind that logo in the sidebar (hex). null =
+    // transparent (blends with the dark sidebar).
+    logoBgColor: { type: DataTypes.STRING(20), allowNull: true, field: 'logo_bg_color' },
     // SmartChallan integration
     scEnabled:        { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, field: 'sc_enabled' },
     scUsername:       { type: DataTypes.STRING(255), allowNull: true, field: 'sc_username' },
