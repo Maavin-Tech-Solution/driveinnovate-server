@@ -31,25 +31,33 @@ const getParentContact = async (userId) => {
   return { name: parent.name, email: parent.email, phone: parent.phone };
 };
 
-// Coerce a brand-text payload into a safe, fixed shape. Each line keeps text +
-// styling only when its text is non-empty; when neither line has text the whole
-// thing collapses to null so the sidebar renders blank.
+// Each brand-text line is a raw HTML snippet (the user pastes styled markup).
+// Branding renders only in the account owner's OWN sidebar, so this is self-
+// scoped, but we still strip active content (scripts, event handlers,
+// javascript: URLs, embeds) as defense-in-depth before it is stored/rendered.
+const sanitizeHtmlLine = (raw) => {
+  // Accept a plain HTML string, or the legacy { text/html } object shape.
+  let s = typeof raw === 'string' ? raw : (raw && (raw.html || raw.text)) || '';
+  s = String(s).trim();
+  if (!s) return null;
+  s = s.slice(0, 2000);
+  s = s
+    // drop dangerous elements entirely (tags + any content between paired ones)
+    .replace(/<\s*(script|iframe|object|embed|style|link|meta|base)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    .replace(/<\s*\/?\s*(script|iframe|object|embed|style|link|meta|base)\b[^>]*>/gi, '')
+    // strip inline event handlers (onclick=…, onerror=…)
+    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    // neutralise javascript: URLs
+    .replace(/javascript\s*:/gi, '');
+  return s.trim() || null;
+};
+
+// Collapse the two-line payload to null when both lines are empty so the sidebar
+// stays blank (no default text).
 const sanitizeBrandText = (raw) => {
   if (!raw || typeof raw !== 'object') return null;
-  const line = (l) => {
-    l = l && typeof l === 'object' ? l : {};
-    const text = String(l.text || '').trim().slice(0, 160);
-    if (!text) return null;
-    const size = Number(l.size);
-    return {
-      text,
-      color: String(l.color || '').trim().slice(0, 40) || null,
-      size: Number.isFinite(size) ? Math.min(48, Math.max(8, Math.round(size))) : null,
-      font: String(l.font || '').trim().slice(0, 80) || null,
-    };
-  };
-  const title = line(raw.title);
-  const subtitle = line(raw.subtitle);
+  const title = sanitizeHtmlLine(raw.title);
+  const subtitle = sanitizeHtmlLine(raw.subtitle);
   if (!title && !subtitle) return null;
   return { title, subtitle };
 };
