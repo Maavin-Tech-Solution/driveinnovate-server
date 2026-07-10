@@ -61,6 +61,9 @@ const MIGRATIONS = [
   // ── user_settings (Menu Manager) ──────────────────────────────────────────
   { table: 'user_settings', column: 'menu_config', ddl: 'JSON NULL COMMENT "Per-user custom 2-level sidebar layout { groups:[{label,items[]}] }"' },
 
+  // ── Per-account brand logo (sidebar branding after login) ────────────────
+  { table: 'di_user', column: 'logo_url',            ddl: 'VARCHAR(500) NULL COMMENT "Per-account brand logo URL; replaces default sidebar mark after login"' },
+
   // ── SmartChallan integration settings ────────────────────────────────────
   { table: 'di_user', column: 'sc_enabled',          ddl: "TINYINT(1) NOT NULL DEFAULT 0 COMMENT \"Master toggle for SmartChallan integration\"" },
   { table: 'di_user', column: 'sc_username',          ddl: "VARCHAR(255) NULL COMMENT \"SmartChallan login email\"" },
