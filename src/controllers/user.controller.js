@@ -248,4 +248,35 @@ const setClientBillingType = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree, upgradeClient, extendClientTrial, getParentContact, setClientBillingType };
+/**
+ * PUT /api/users/clients/:clientId/password
+ * Body: { newPassword }
+ * Dealer/papa resets a NETWORK client's login password.
+ */
+const resetClientPassword = async (req, res) => {
+  try {
+    const isPapa = Number(req.user.parentId) === 0;
+    const isDealer = req.user.role === 'dealer';
+    if (!isPapa && !isDealer) {
+      return res.status(403).json({ success: false, message: 'Only papa or dealer can reset a client password.' });
+    }
+    const { newPassword } = req.body;
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ success: false, message: 'newPassword must be at least 6 characters' });
+    }
+    const result = await userService.resetClientPassword({
+      actorId: req.user.id,
+      actorName: req.user.name,
+      callerClientIds: req.user.clientIds,
+      clientId: Number(req.params.clientId),
+      newPassword,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    return res.json({ success: true, message: 'Client password reset successfully', data: result });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { getProfile, updateProfile, updatePassword, updateNotifications, createClient, listClients, getClientDetail, getClientTree, upgradeClient, extendClientTrial, getParentContact, setClientBillingType, resetClientPassword };

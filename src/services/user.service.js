@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const { UniqueConstraintError, fn, col, Op } = require('sequelize');
-const { sequelize, User, UserMeta, Vehicle, TeamMember, TeamVehicle } = require('../models');
+const { sequelize, User, UserMeta, Vehicle, TeamMember, TeamVehicle, UserActivity } = require('../models');
 const { getSystemSettings } = require('./master.service');
 
 const getProfile = async (userId) => {
@@ -454,6 +454,55 @@ const setBillingType = async (clientId, callerClientIds, { billingType, graceDay
   return { id: client.id, billingType: client.billingType, graceDays: client.graceDays };
 };
 
+/**
+ * Reset a network client's login password (dealer/papa admin action).
+ *
+ * Scope: the target must be inside the caller's ownership network
+ * (callerClientIds = [self, ...descendant accounts]). Resetting your OWN
+ * password here is blocked — that path skips the current-password check, so
+ * self-service must go through updatePassword (PUT /me/password) instead.
+ *
+ * The new password is set directly (the dealer relays it to the client
+ * out-of-band). The action is audit-logged on the CLIENT's timeline so the
+ * client can see their password was changed and by whom.
+ */
+const resetClientPassword = async ({ actorId, actorName, callerClientIds, clientId, newPassword, ipAddress, userAgent }) => {
+  const targetId = Number(clientId);
+  if (!Number.isInteger(targetId)) {
+    const err = new Error('Invalid client id'); err.status = 400; throw err;
+  }
+  if (targetId === Number(actorId)) {
+    const err = new Error('Use your profile settings to change your own password.'); err.status = 400; throw err;
+  }
+  if (!callerClientIds?.includes(targetId)) {
+    const err = new Error('You do not have access to this client.'); err.status = 403; throw err;
+  }
+  if (!newPassword || String(newPassword).length < 6) {
+    const err = new Error('New password must be at least 6 characters'); err.status = 400; throw err;
+  }
+
+  const client = await User.findByPk(targetId);
+  if (!client) { const err = new Error('Client not found'); err.status = 404; throw err; }
+
+  const hashed = await bcrypt.hash(String(newPassword), 12);
+  await client.update({ password: hashed });
+
+  // Audit trail — recorded on the client's own activity feed for transparency.
+  try {
+    await UserActivity.create({
+      userId: targetId,
+      action: 'PASSWORD_RESET',
+      description: `Password reset by ${actorName || 'account owner'} (user #${actorId})`,
+      ipAddress,
+      userAgent,
+      module: 'Users',
+      status: 'success',
+    });
+  } catch (_) { /* logging must never block the reset */ }
+
+  return { id: client.id, name: client.name, email: client.email };
+};
+
 module.exports = {
   getProfile,
   getParentContact,
@@ -467,4 +516,5 @@ module.exports = {
   upgradeToBillable,
   extendTrial,
   setBillingType,
+  resetClientPassword,
 };

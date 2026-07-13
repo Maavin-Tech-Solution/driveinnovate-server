@@ -39,4 +39,7 @@ router.post('/clients/:clientId/extend-trial', validateConsumer, userController.
 // PUT /api/users/clients/:clientId/billing-type - switch prepaid/postpaid
 router.put('/clients/:clientId/billing-type', validateConsumer, userController.setClientBillingType);
 
+// PUT /api/users/clients/:clientId/password - dealer/papa resets a network client's password
+router.put('/clients/:clientId/password', validateConsumer, userController.resetClientPassword);
+
 module.exports = router;
