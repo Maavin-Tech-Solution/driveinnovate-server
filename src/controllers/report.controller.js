@@ -3,6 +3,22 @@ const { Op } = require('sequelize');
 const { Vehicle, UserSettings } = require('../models');
 
 /**
+ * CSV "lat,lng" cell for a trip/stop row.
+ *
+ * lat/lng come from DECIMAL columns, which Sequelize returns as STRINGS (to keep
+ * precision) — so calling `.toFixed()` on them throws "toFixed is not a function".
+ * They can also be null when a trip/stop has no GPS fix. Coerce safely and, since
+ * the value itself contains a comma, wrap it in quotes so the CSV stays aligned.
+ */
+function csvLatLng(lat, lng) {
+  const n = (v) => {
+    const num = Number(v);
+    return v == null || Number.isNaN(num) ? '' : num.toFixed(6);
+  };
+  return `"${n(lat)},${n(lng)}"`;
+}
+
+/**
  * Resolve the set of vehicle IDs the caller may query.
  * – If the caller passes vehicleIds, each one is verified against req.user.clientIds.
  * – Otherwise we return all vehicles across the caller's network.
@@ -499,8 +515,8 @@ exports.exportTripReport = async (req, res) => {
         t.imei,
         Math.floor(t.duration / 60),
         t.distance,
-        `${t.startLatitude.toFixed(6)},${t.startLongitude.toFixed(6)}`,
-        `${t.endLatitude.toFixed(6)},${t.endLongitude.toFixed(6)}`,
+        csvLatLng(t.startLatitude, t.startLongitude),
+        csvLatLng(t.endLatitude, t.endLongitude),
         t.avgSpeed,
         t.maxSpeed
       ].join(',');
@@ -549,7 +565,7 @@ exports.exportStopReport = async (req, res) => {
         s.vehicle?.vehicleNumber || 'N/A',
         s.imei,
         Math.floor(s.duration / 60),
-        `${s.latitude.toFixed(6)},${s.longitude.toFixed(6)}`,
+        csvLatLng(s.latitude, s.longitude),
         s.stopType,
         s.engineStatus ? 'ON' : 'OFF'
       ].join(',');
