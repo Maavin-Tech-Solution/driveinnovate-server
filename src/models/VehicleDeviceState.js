@@ -109,6 +109,12 @@ const VehicleDeviceState = sequelize.define('VehicleDeviceState', {
     comment: 'AIS140 vehicle movement sensor (true=moving, false=stationary, null=no data)',
   },
 
+  // ── Geofence inside-state ────────────────────────────────────────────────
+  geoInside: {
+    type: DataTypes.JSON, allowNull: true, field: 'geo_inside',
+    comment: 'Per-geofence inside flags {geofenceId: bool} — persists entry/exit state across restarts',
+  },
+
   // ── Packet timing ────────────────────────────────────────────────────────
   lastPacketTime: {
     type: DataTypes.DATE, allowNull: true, field: 'last_packet_time',

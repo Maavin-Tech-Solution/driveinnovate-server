@@ -31,6 +31,12 @@ const UserPermission = sequelize.define(
     canViewNotifications: { type: DataTypes.BOOLEAN, defaultValue: false },
     canManageTeams: { type: DataTypes.BOOLEAN, defaultValue: false },
     canManageBilling: { type: DataTypes.BOOLEAN, defaultValue: false },
+    // Device-data visibility (client accounts)
+    canSeeIMEI: { type: DataTypes.BOOLEAN, defaultValue: false, field: 'can_see_imei' },
+    canSeeSIM: { type: DataTypes.BOOLEAN, defaultValue: false, field: 'can_see_sim' },
+    // Delegation rights (dealer accounts) — required to grant canSeeIMEI/canSeeSIM to children
+    canAllowIMEI: { type: DataTypes.BOOLEAN, defaultValue: false, field: 'can_allow_imei' },
+    canAllowSIM: { type: DataTypes.BOOLEAN, defaultValue: false, field: 'can_allow_sim' },
   },
   {
     tableName: 'di_user_permissions',

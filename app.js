@@ -9,6 +9,8 @@ const routes = require('./src/routes');
 const mongoose = require('mongoose');
 const { connectMongoDB, getMongoDb } = require('./src/config/mongodb');
 const { processPacket, reconcileStaleTrips, catchUpMissedPackets } = require('./src/services/packetProcessor.service');
+const { isCollectionRouted, kinesisConsumeEnabled, routedTypes } = require('./src/config/kinesisRouting');
+const { startKinesisConsumer, getKinesisConsumerStatus } = require('./src/services/kinesisConsumer.service');
 const { startAlertEngine } = require('./src/services/alertEngine.service');
 const { seedBuiltIns } = require('./src/services/master.service');
 const { runMigrations } = require('./src/config/migrate');
@@ -104,6 +106,9 @@ app.get('/api/health/mongo', (req, res) => {
         alive:      s.alive,
         startedAt:  s.startedAt,
       })),
+      // Phase-2 pilot: device types routed via AWS Kinesis instead of the
+      // change stream (KINESIS_CONSUME_ENABLED + KINESIS_CONSUME_TYPES).
+      kinesisConsumer: getKinesisConsumerStatus(),
       advice: healthy ? null : [
         'MongoDB is not connected. Change streams and live packet processing are paused.',
         'Packets from device TCP servers are being buffered in memory.',
@@ -176,6 +181,20 @@ sequelize
     server.listen(PORT, () => {
       const proto = server instanceof https.Server ? 'HTTPS' : 'HTTP';
       console.log(`DriveInnovate Server running on ${proto} port ${PORT}`);
+      // Phase-2 pilot: consume routed device types (GT06) from Kinesis.
+      // Independent of MongoDB — processPacket writes MySQL. No-op unless
+      // KINESIS_CONSUME_ENABLED=true. Routed packets flow through the same
+      // per-vehicle enqueuePacket serialization as the change stream.
+      if (kinesisConsumeEnabled()) {
+        console.log(`[Kinesis] Routing ${routedTypes().join(', ')} through Kinesis consumer (change streams skipped for those collections)`);
+      }
+      startKinesisConsumer((doc, deviceType) => {
+        enqueuePacket(doc.imei, () =>
+          processPacket(doc, deviceType).catch(err =>
+            console.error(`[KinesisConsumer] processPacket error imei=${doc.imei}:`, err.message)
+          )
+        );
+      });
       startAlertEngine();
       startTrialExpiryJob();
       startVehicleExpiryJob();
@@ -255,6 +274,14 @@ async function startChangeStreams() {
     const deviceType = cfg.type || cfg.deviceType;
     if (!col || !deviceType || seen.has(col)) continue;
     seen.add(col);
+    // Exactly-once guard: a collection routed to the Kinesis consumer must NOT
+    // also be watched here — processing the same packet twice would corrupt the
+    // trip/state machine (double-counted distance). kinesisRouting flips both
+    // sides atomically off the same env vars.
+    if (isCollectionRouted(col)) {
+      console.log(`[ChangeStream] SKIP ${col} (${deviceType}) — routed via Kinesis consumer`);
+      continue;
+    }
     watchCollection(col, deviceType);
   }
 }

@@ -28,7 +28,7 @@ const getUserSettings = async (userId) => {
  * Update user settings
  */
 const updateUserSettings = async (userId, data) => {
-  const { speedRanges, speedThreshold, menuConfig } = data;
+  const { speedRanges, speedThreshold, menuConfig, geofenceAsAddress } = data;
   
   // Validate speed ranges
   if (speedRanges) {
@@ -74,6 +74,7 @@ const updateUserSettings = async (userId, data) => {
       ...(speedRanges && { speedRanges }),
       ...(speedThreshold !== undefined && { speedThreshold }),
       ...(menuConfig !== undefined && { menuConfig }),
+      ...(geofenceAsAddress !== undefined && { geofenceAsAddress: Boolean(geofenceAsAddress) }),
     });
   } else {
     // Create new settings
@@ -88,6 +89,7 @@ const updateUserSettings = async (userId, data) => {
       ],
       speedThreshold: speedThreshold !== undefined ? speedThreshold : 80,
       ...(menuConfig !== undefined && { menuConfig }),
+      ...(geofenceAsAddress !== undefined && { geofenceAsAddress: Boolean(geofenceAsAddress) }),
     });
   }
 

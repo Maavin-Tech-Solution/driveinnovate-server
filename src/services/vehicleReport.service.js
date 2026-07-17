@@ -54,6 +54,58 @@ function sessionDuration(sess, now = Date.now()) {
 }
 
 /**
+ * Best-estimate end of a session (ms). Mirrors sessionDuration()'s priority
+ * chain but expressed as an absolute point in time so sessions can be
+ * clamped to a report window.
+ */
+function sessionEndMs(sess, now = Date.now()) {
+  if (sess.endTime) return new Date(sess.endTime).getTime();
+  const start = new Date(sess.startTime).getTime();
+  if (sess.durationSeconds != null && sess.durationSeconds > 0) {
+    return start + sess.durationSeconds * 1000;
+  }
+  const accum = (sess.drivingSeconds || 0) + (sess.idleSeconds || 0);
+  if (accum > 0) return start + accum * 1000;
+  return now; // genuinely active session — engine considered on until now
+}
+
+/**
+ * Convert engine sessions into non-overlapping ON intervals clipped to
+ * [from, to]. Duplicate, overlapping, or stale never-closed 'active'
+ * sessions therefore cannot double-count: summed engine time is
+ * mathematically bounded by the window length.
+ *
+ * Returns merged [{ s, e }] in ms.
+ */
+function sessionIntervalsInWindow(sessions, from, to, now = Date.now()) {
+  const fromMs = from.getTime();
+  const toMs   = Math.min(to.getTime(), now);
+
+  const intervals = sessions
+    .map(sess => ({
+      s: Math.max(new Date(sess.startTime).getTime(), fromMs),
+      e: Math.min(sessionEndMs(sess, now), toMs),
+    }))
+    .filter(i => i.e > i.s)
+    .sort((a, b) => a.s - b.s);
+
+  if (!intervals.length) return [];
+
+  const merged = [];
+  let { s: curS, e: curE } = intervals[0];
+  for (let i = 1; i < intervals.length; i++) {
+    const { s, e } = intervals[i];
+    if (s <= curE) { curE = Math.max(curE, e); }
+    else { merged.push({ s: curS, e: curE }); curS = s; curE = e; }
+  }
+  merged.push({ s: curS, e: curE });
+  return merged;
+}
+
+const intervalSecs = (intervals) =>
+  intervals.reduce((s, i) => s + Math.floor((i.e - i.s) / 1000), 0);
+
+/**
  * Derive parking stops from gaps between consecutive completed trips.
  *
  * A parking "stop" is a continuous engine-OFF gap between trips that is
@@ -206,7 +258,9 @@ async function getSummary(vehicleId, from, to) {
   ]);
 
   const totalDistance = trips.reduce((s, t) => s + parseFloat(t.distance || 0), 0);
-  const engineSecs    = sessions.reduce((s, e) => s + sessionDuration(e), 0);
+  // Merge sessions into non-overlapping ON intervals clipped to the window —
+  // duplicate/stale sessions can no longer inflate the total past the window.
+  const engineSecs    = intervalSecs(sessionIntervalsInWindow(sessions, from, to));
   const maxSpeed = trips.reduce((m, t) => Math.max(m, parseFloat(t.maxSpeed || 0)), 0);
   const speedTrips = trips.filter(t => parseFloat(t.avgSpeed) > 0);
   const avgSpeed = speedTrips.length
@@ -279,10 +333,30 @@ async function getDailyStats(vehicleId, from, to) {
   sessions.forEach(e => {
     const k = dayKey(e.startTime);
     ensureDay(k);
-    // Use reliable duration fallback chain instead of durationSeconds alone
-    dayMap[k].engineSecs += sessionDuration(e);
     if (dayMap[k].fuelStart === null) dayMap[k].fuelStart = parseFloat(e.startFuelLevel || 0);
     dayMap[k].fuelEnd = parseFloat(e.endFuelLevel ?? dayMap[k].fuelEnd ?? 0);
+  });
+
+  // Engine hours: merged non-overlapping ON intervals, sliced per IST day so
+  // overlapping/stale sessions can't double-count and a day is capped at 24 h.
+  sessionIntervalsInWindow(sessions, from, to).forEach(({ s: onStart, e: onEnd }) => {
+    let cursor = onStart;
+    while (cursor < onEnd) {
+      const istCursor   = new Date(cursor + IST_OFFSET_MS);
+      const istDayStart = new Date(Date.UTC(
+        istCursor.getUTCFullYear(), istCursor.getUTCMonth(), istCursor.getUTCDate()
+      ) - IST_OFFSET_MS);
+      const istDayEnd   = new Date(istDayStart.getTime() + 24 * 60 * 60 * 1000);
+
+      const sliceEnd  = Math.min(onEnd, istDayEnd.getTime());
+      const sliceSecs = Math.max(0, Math.floor((sliceEnd - cursor) / 1000));
+      if (sliceSecs > 0) {
+        const k = dayKey(cursor);
+        ensureDay(k);
+        dayMap[k].engineSecs += sliceSecs;
+      }
+      cursor = istDayEnd.getTime();
+    }
   });
 
   // Parking: derive from trip gaps — Stop table is not populated by the pipeline.
@@ -375,9 +449,18 @@ async function getEngineHours(vehicleId, from, to, limit = 500, offset = 0) {
     where: { vehicleId, startTime: dateRange(from, to), status: 'completed' },
     attributes: ['durationSeconds', 'distanceKm', 'fuelConsumed', 'startFuelLevel', 'endFuelLevel', 'startTime', 'endTime'],
   });
-  const totalSecs = all.reduce((s, e) => s + sessionDuration(e), 0);
+  // Merged + window-clipped so overlapping sessions can't inflate the total
+  const totalSecs = intervalSecs(sessionIntervalsInWindow(all, from, to));
   const totalDist = all.reduce((s, e) => s + parseFloat(e.distanceKm || 0), 0);
   const totalFuel = all.reduce((s, e) => s + parseFloat(e.fuelConsumed || 0), 0);
+
+  // Per-row duration clipped to the report window so a stale never-closed
+  // 'active' session can't display a weeks-long value.
+  const rowSecs = (s) => {
+    const start = Math.max(new Date(s.startTime).getTime(), from.getTime());
+    const end   = Math.min(sessionEndMs(s), to.getTime(), Date.now());
+    return Math.max(0, Math.floor((end - start) / 1000));
+  };
 
   return {
     unit: vehicle.vehicleNumber,
@@ -388,8 +471,8 @@ async function getEngineHours(vehicleId, from, to, limit = 500, offset = 0) {
       end: s.endTime,
       startLocation: s.startLocation || `${s.startLatitude},${s.startLongitude}`,
       endLocation: s.endLocation || (s.endLatitude ? `${s.endLatitude},${s.endLongitude}` : '—'),
-      engineHours: secsToHMS(sessionDuration(s)),
-      engineHoursSecs: sessionDuration(s),
+      engineHours: secsToHMS(rowSecs(s)),
+      engineHoursSecs: rowSecs(s),
       mileage: parseFloat(s.distanceKm || 0).toFixed(3),
       consFls: parseFloat(s.fuelConsumed || 0).toFixed(2),
       startFuelLevel: s.startFuelLevel,

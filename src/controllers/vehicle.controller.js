@@ -1,7 +1,9 @@
 const vehicleService = require('../services/vehicle.service');
 const { buildVehicleScope } = require('../utils/vehicleScope');
 const { getSystemSettings } = require('../services/master.service');
-const { User, Vehicle } = require('../models');
+const { getUserSettings } = require('../services/settings.service');
+const { isPointInsideGeofence } = require('../services/geofence.service');
+const { User, Vehicle, Geofence } = require('../models');
 const { Op } = require('sequelize');
 
 /**
@@ -238,6 +240,26 @@ const getLivePositions = async (req, res) => {
     // map also gets live updates — accounts by ownership, members by team.
     const scope = buildVehicleScope(req.user, req.query.clientId);
     const data = await vehicleService.getLivePositions(scope);
+
+    // Geofence-as-address: when the account has opted in, tag each position
+    // with the name of the geofence containing it so web/mobile can show the
+    // geofence name as the vehicle's primary location. Best-effort — must
+    // never break the live poll.
+    try {
+      const settings = await getUserSettings(req.user.id);
+      if (settings.geofenceAsAddress) {
+        const clientIds = req.user.clientIds?.length ? req.user.clientIds : [req.user.id];
+        const fences = await Geofence.findAll({ where: { clientId: clientIds, isActive: true } });
+        if (fences.length) {
+          for (const p of data) {
+            if (p.lat == null || p.lng == null) continue;
+            const hit = fences.find(g => isPointInsideGeofence(g, p.lat, p.lng));
+            if (hit) p.geofenceName = hit.name;
+          }
+        }
+      }
+    } catch { /* annotation only */ }
+
     return res.json({ success: true, data });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

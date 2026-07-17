@@ -20,7 +20,10 @@ const createAlert = async (clientId, data) => {
   const { name, description, type, scope, vehicleId, groupId, threshold, windowMinutes, cooldownMinutes, notifyEmails, isActive } = data;
   if (!name?.trim()) { const e = new Error('Alert name is required'); e.status = 400; throw e; }
   if (!type) { const e = new Error('Alert type is required'); e.status = 400; throw e; }
-  if (!threshold || isNaN(threshold)) { const e = new Error('Threshold is required'); e.status = 400; throw e; }
+  // ENGINE_ON_OFF fires on every ignition transition — no threshold to configure.
+  if (type !== 'ENGINE_ON_OFF' && (!threshold || isNaN(threshold))) {
+    const e = new Error('Threshold is required'); e.status = 400; throw e;
+  }
   if (type === 'FUEL_THEFT' && (!windowMinutes || isNaN(windowMinutes))) {
     const e = new Error('windowMinutes is required for FUEL_THEFT alerts'); e.status = 400; throw e;
   }
@@ -43,7 +46,7 @@ const createAlert = async (clientId, data) => {
     scope: scope || 'ALL',
     vehicleId: scope === 'VEHICLE' ? vehicleId : null,
     groupId: scope === 'GROUP' ? groupId : null,
-    threshold: parseFloat(threshold),
+    threshold: threshold && !isNaN(threshold) ? parseFloat(threshold) : 0,
     windowMinutes: windowMinutes ? parseInt(windowMinutes) : null,
     cooldownMinutes: cooldownMinutes ? parseInt(cooldownMinutes) : 30,
     notifyEmails: notifyEmails || null,

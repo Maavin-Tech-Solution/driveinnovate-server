@@ -18,6 +18,10 @@ const PERMISSION_KEYS = [
   'canViewNotifications',
   'canManageTeams',
   'canManageBilling',
+  'canSeeIMEI',
+  'canSeeSIM',
+  'canAllowIMEI',
+  'canAllowSIM',
 ];
 
 const ALL_TRUE = Object.fromEntries(PERMISSION_KEYS.map(k => [k, true]));

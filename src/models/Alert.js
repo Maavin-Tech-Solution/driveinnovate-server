@@ -17,9 +17,11 @@ const Alert = sequelize.define('Alert', {
    * NOT_MOVING      — vehicle speed = 0 for >= threshold minutes
    * IDLE_ENGINE     — engine ON + speed = 0 for >= threshold minutes
    * FUEL_THEFT      — fuel drops by >= threshold litres within windowMinutes
+   * OFFLINE         — no packet of ANY type for >= threshold minutes (data loss)
+   * ENGINE_ON_OFF   — ignition switched ON or OFF (threshold unused, store 0)
    */
   type: {
-    type: DataTypes.ENUM('SPEED_EXCEEDED', 'NOT_MOVING', 'IDLE_ENGINE', 'FUEL_THEFT'),
+    type: DataTypes.ENUM('SPEED_EXCEEDED', 'NOT_MOVING', 'IDLE_ENGINE', 'FUEL_THEFT', 'OFFLINE', 'ENGINE_ON_OFF'),
     allowNull: false,
   },
 

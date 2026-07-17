@@ -55,7 +55,17 @@ const updatePermissions = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Papa permissions cannot be modified' });
     }
 
-    const permissions = await setPermissions(targetId, req.body);
+    // IMEI/SIM visibility can only be granted by papa or by a dealer who holds
+    // the matching "can allow" delegation right. A dealer without the right
+    // has those keys silently ignored (existing values stay untouched).
+    const updates = { ...req.body };
+    if (Number(caller.parentId) !== 0) {
+      const callerPerms = await getPermissions(caller);
+      if (!callerPerms.canAllowIMEI) { delete updates.canSeeIMEI; delete updates.canAllowIMEI; }
+      if (!callerPerms.canAllowSIM)  { delete updates.canSeeSIM;  delete updates.canAllowSIM; }
+    }
+
+    const permissions = await setPermissions(targetId, updates);
     return res.json({ success: true, message: 'Permissions updated', data: { userId: targetId, permissions } });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });

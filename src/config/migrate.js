@@ -32,6 +32,7 @@ const MIGRATIONS = [
   { table: 'vehicle_device_states', column: 'first_seen_at', ddl: 'DATETIME NULL COMMENT "Real server UTC when the first packet was ever processed"' },
   { table: 'vehicle_device_states', column: 'last_seen_at',          ddl: 'DATETIME(6) NULL COMMENT "Real server UTC at last packet processing — never bumped by reconcile/migrations"' },
   { table: 'vehicle_device_states', column: 'last_movement',         ddl: 'TINYINT(1) NULL COMMENT "AIS140 movement sensor: 1=moving, 0=stationary, NULL=device has no movement sensor"' },
+  { table: 'vehicle_device_states', column: 'geo_inside',            ddl: 'JSON NULL COMMENT "Per-geofence inside flags {geofenceId: bool} — persists entry/exit state across restarts"' },
 
   // ── trips ──────────────────────────────────────────────────────────────────
   { table: 'trips', column: 'status', ddl: "ENUM('in_progress','completed') NOT NULL DEFAULT 'completed' COMMENT \"Trip lifecycle state\"" },
@@ -124,6 +125,15 @@ const MIGRATIONS = [
   { table: 'di_wallet', column: 'balance_testing', ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Testing tokens"' },
   { table: 'di_wallet', column: 'balance_grace',   ddl: 'INT NOT NULL DEFAULT 0 COMMENT "Grace/complimentary tokens"' },
 
+  // ── IMEI/SIM visibility (client) + delegation rights (dealer) ─────────────
+  { table: 'di_user_permissions', column: 'can_see_imei',   ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Account can view device IMEI numbers"' },
+  { table: 'di_user_permissions', column: 'can_see_sim',    ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Account can view device SIM numbers"' },
+  { table: 'di_user_permissions', column: 'can_allow_imei', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Dealer may grant IMEI visibility to child accounts"' },
+  { table: 'di_user_permissions', column: 'can_allow_sim',  ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "Dealer may grant SIM visibility to child accounts"' },
+
+  // ── user_settings: show geofence name as address when inside one ──────────
+  { table: 'user_settings', column: 'geofence_as_address', ddl: 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT "When vehicle is inside a geofence, show geofence name as its primary location"' },
+
 ];
 
 /**
@@ -145,7 +155,20 @@ const ENUM_PATCHES = [
     table:        'alerts',
     column:       'type',
     mustContain:  'FUEL_THEFT',
-    fullDdl:      "ENUM('SPEED_EXCEEDED','NOT_MOVING','IDLE_ENGINE','FUEL_THEFT') NOT NULL",
+    fullDdl:      "ENUM('SPEED_EXCEEDED','NOT_MOVING','IDLE_ENGINE','FUEL_THEFT','OFFLINE','ENGINE_ON_OFF') NOT NULL",
+  },
+  // Data-loss + ignition-transition alert types (2026-07)
+  {
+    table:        'alerts',
+    column:       'type',
+    mustContain:  'OFFLINE',
+    fullDdl:      "ENUM('SPEED_EXCEEDED','NOT_MOVING','IDLE_ENGINE','FUEL_THEFT','OFFLINE','ENGINE_ON_OFF') NOT NULL",
+  },
+  {
+    table:        'alerts',
+    column:       'type',
+    mustContain:  'ENGINE_ON_OFF',
+    fullDdl:      "ENUM('SPEED_EXCEEDED','NOT_MOVING','IDLE_ENGINE','FUEL_THEFT','OFFLINE','ENGINE_ON_OFF') NOT NULL",
   },
   // Token billing model: invoices are now primarily RECHARGE (token sales).
   {

@@ -56,9 +56,17 @@ const MIN_TRIP_DISTANCE_KM     = 0.05;  // trips shorter than 50 m are noise
 // ── Geofence position state ───────────────────────────────────────────────────
 // Tracks whether each vehicle was inside each of its geofences on the PREVIOUS
 // GPS packet.  Key: `${vehicleId}_${geofenceId}`, Value: boolean.
-// In-memory only — after server restart the first packet recalibrates state
-// without generating false alerts (we only fire on transitions, not first read).
+// In-memory L1 cache; the authoritative copy is persisted in
+// VehicleDeviceState.geoInside so entry/exit transitions survive server
+// restarts (previously every restart silently re-calibrated and swallowed the
+// first transition — the main cause of "geofence alerts are inconsistent").
 const _geoState = new Map();
+
+// Newest GPS event time evaluated per vehicle. Replayed/buffered history
+// packets arrive with OLD event times — evaluating them would flip the
+// inside/outside state backwards and fire false entry/exit alerts. Geofence
+// logic only ever evaluates monotonically non-decreasing event times.
+const _geoLastEvt = new Map(); // vehicleId -> ms
 
 /**
  * Haversine distance in metres (duplicated from geofence.service to avoid
@@ -99,7 +107,7 @@ const _isInsideGeo = (geo, lat, lng) => {
  * geofences and fire GEOFENCE_ENTRY / GEOFENCE_EXIT notifications.
  * Called once per GPS-bearing packet after position is updated.
  */
-async function checkGeofences(vehicle, lat, lng, pkt) {
+async function checkGeofences(vehicle, lat, lng, pkt, state = null) {
   // ── Bug-guard: clientId missing means vehicle was cached before the field
   // was added to the query.  Look it up fresh instead of silently bailing.
   let clientId = vehicle.clientId;
@@ -111,6 +119,21 @@ async function checkGeofences(vehicle, lat, lng, pkt) {
   if (!clientId || !lat || !lng) {
     console.warn(`[Geofence] skip vehicle ${vehicle.id} — no clientId or coords`);
     return;
+  }
+
+  // India network is wholly N+E hemisphere — a GT06 N/S course-status bit flip
+  // occasionally delivers a negative latitude, which would read as a false
+  // geofence EXIT. Clamp before any containment test.
+  lat = Math.abs(lat);
+  lng = Math.abs(lng);
+
+  // Replay guard: buffered/history packets carry old event times; evaluating
+  // them would flip inside/outside state backwards → false entry/exit alerts.
+  const evtMs = pkt?.timestamp ? new Date(pkt.timestamp).getTime() : null;
+  if (evtMs) {
+    const lastEvt = _geoLastEvt.get(vehicle.id) || 0;
+    if (evtMs < lastEvt) return; // stale replay — skip silently
+    _geoLastEvt.set(vehicle.id, evtMs);
   }
 
   // ── Direct vehicle assignments + group memberships ──
@@ -156,6 +179,12 @@ async function checkGeofences(vehicle, lat, lng, pkt) {
     if (a.alertOnExit)  assignMap[a.geofenceId].alertOnExit  = true;
   });
 
+  // Authoritative inside-state persisted on the device-state row so restarts
+  // don't swallow transitions. In-memory map is just a hot cache on top.
+  const persisted   = (state && state.geoInside && typeof state.geoInside === 'object') ? state.geoInside : {};
+  const nextPersist = { ...persisted };
+  let   persistDirty = false;
+
   for (const geo of geofences) {
     const geoData   = geo.toJSON ? geo.toJSON() : geo;
     // Parse coordinates if stored as a string (defensive)
@@ -163,15 +192,21 @@ async function checkGeofences(vehicle, lat, lng, pkt) {
       try { geoData.coordinates = JSON.parse(geoData.coordinates); } catch { geoData.coordinates = []; }
     }
 
-    const stateKey  = `${vehicle.id}_${geoData.id}`;
-    const wasInside = _geoState.get(stateKey); // undefined = first packet
+    const stateKey = `${vehicle.id}_${geoData.id}`;
+    const memVal   = _geoState.get(stateKey);
+    // Prefer the in-memory value (newest), fall back to the persisted flag
+    // (survives restarts), undefined = genuinely first-ever observation.
+    const wasInside = memVal !== undefined
+      ? memVal
+      : (persisted[geoData.id] !== undefined ? Boolean(persisted[geoData.id]) : undefined);
     const nowInside = _isInsideGeo(geoData, lat, lng);
 
     console.log(`[Geofence] "${geoData.name}" wasInside=${wasInside} nowInside=${nowInside}`);
 
     _geoState.set(stateKey, nowInside);
+    if (nextPersist[geoData.id] !== nowInside) { nextPersist[geoData.id] = nowInside; persistDirty = true; }
 
-    // First packet after restart: initialise state, no alert (avoids false trigger)
+    // First-ever observation of this vehicle/geofence pair: initialise, no alert
     if (wasInside === undefined) continue;
 
     const assign    = assignMap[geoData.id] || {};
@@ -220,6 +255,12 @@ async function checkGeofences(vehicle, lat, lng, pkt) {
     } catch (err) {
       console.error('[Geofence] Failed to create notification:', err.message);
     }
+  }
+
+  // Persist inside-state only when it changed (one cheap UPDATE per transition)
+  if (state && persistDirty) {
+    try { await state.update({ geoInside: nextPersist }); }
+    catch (err) { console.warn('[Geofence] failed to persist geoInside:', err.message); }
   }
 }
 
@@ -923,7 +964,7 @@ async function processPacketInner(doc, deviceType, _state) {
     // ── Geofence entry/exit check (non-blocking) ────────────────────────────
     // Only run when this packet has a valid GPS fix so we have a real position.
     if (pkt.hasGps && pkt.lat && pkt.lng) {
-      checkGeofences(vehicle, pkt.lat, pkt.lng, pkt).catch(err =>
+      checkGeofences(vehicle, pkt.lat, pkt.lng, pkt, state).catch(err =>
         console.error('[Geofence] checkGeofences error:', err.message)
       );
     }
@@ -1095,13 +1136,21 @@ async function catchUpMissedPackets() {
   let totalVehicles = 0;
   let totalPackets  = 0;
 
+  // Kinesis-routed device types must NOT be caught up from Mongo: during
+  // dual-write their packets still land in Mongo, but the Kinesis consumer has
+  // already processed them (its own checkpoint + stream retention is the
+  // catch-up mechanism). Replaying them here would double-process and corrupt
+  // trip distance/state.
+  const { isCollectionRouted } = require('../config/kinesisRouting');
+
   for (const vehicle of vehicles) {
     try {
+      const caps = getCapabilities(vehicle.deviceType);
+      if (isCollectionRouted(caps.mongoCollection)) continue; // Kinesis owns this type
+
       const state = await VehicleDeviceState.findOne({ where: { vehicleId: vehicle.id } });
       const lastSeen = state?.lastPacketTime ? new Date(state.lastPacketTime) : null;
       const fromDate = lastSeen && lastSeen > cutoff ? lastSeen : cutoff;
-
-      const caps = getCapabilities(vehicle.deviceType);
 
       const imeiVariants = [vehicle.imei];
       if (vehicle.imei.startsWith('0')) imeiVariants.push(vehicle.imei.slice(1));

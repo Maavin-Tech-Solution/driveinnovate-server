@@ -5,6 +5,7 @@ const nodemailer = require('nodemailer');
 const { Op, UniqueConstraintError } = require('sequelize');
 const { User, UserMeta, UserActivity, AuthOtp, TeamMember, TeamVehicle } = require('../models');
 const { getPermissions } = require('./permission.service');
+const { getUserSettings } = require('./settings.service');
 const { getSystemSettings } = require('./master.service');
 
 const OTP_EXPIRY_MINUTES = Number(process.env.OTP_EXPIRY_MINUTES || 10);
@@ -254,6 +255,9 @@ const login = async ({ email, password, ipAddress, userAgent }) => {
 
   const roleData = await resolveUserRole(user);
   const permissions = await getPermissions(user);
+  // Account settings (speed ranges, geofence-as-address, …) ride along so
+  // web/mobile apps can configure themselves from the login response alone.
+  const settings = (await getUserSettings(user.id)).toJSON();
 
   const token = jwt.sign(
     { id: user.id, email: user.email, role: roleData.role },
@@ -262,7 +266,7 @@ const login = async ({ email, password, ipAddress, userAgent }) => {
   );
 
   const { password: _, ...userWithoutPassword } = user.toJSON();
-  return { user: { ...userWithoutPassword, ...roleData, permissions }, token };
+  return { user: { ...userWithoutPassword, ...roleData, permissions, settings }, token };
 };
 
 const requestLoginOtp = async ({ email, ipAddress, userAgent }) => {
@@ -364,6 +368,7 @@ const verifyLoginOtp = async ({ email, otp, ipAddress, userAgent }) => {
 
   const roleData = await resolveUserRole(user);
   const permissions = await getPermissions(user);
+  const settings = (await getUserSettings(user.id)).toJSON();
 
   const token = jwt.sign(
     { id: user.id, email: user.email, role: roleData.role },
@@ -372,7 +377,7 @@ const verifyLoginOtp = async ({ email, otp, ipAddress, userAgent }) => {
   );
 
   const { password: _, ...userWithoutPassword } = user.toJSON();
-  return { user: { ...userWithoutPassword, ...roleData, permissions }, token };
+  return { user: { ...userWithoutPassword, ...roleData, permissions, settings }, token };
 };
 
 const requestForgotPasswordOtp = async ({ email, ipAddress, userAgent }) => {

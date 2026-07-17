@@ -33,6 +33,14 @@ const UserSettings = sequelize.define(
       field: 'speed_threshold',
       defaultValue: 80,
     },
+    // When true and a vehicle is inside a geofence, show the geofence name as
+    // the vehicle's primary location instead of the reverse-geocoded address.
+    geofenceAsAddress: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      field: 'geofence_as_address',
+      defaultValue: false,
+    },
     // Per-user custom 2-level sidebar layout, built in the Menu Manager.
     // Shape: { groups: [{ label, items: [pageKey, ...] }] }. null = use default.
     menuConfig: {
