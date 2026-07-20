@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="driveinnovate-server"   # adjust if your pm2 process name differs (pm2 ls)
+APP_NAME="di-server"   # adjust if your pm2 process name differs (pm2 ls)
 
 BEFORE=$(git rev-parse HEAD)
 git pull --ff-only
