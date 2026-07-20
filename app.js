@@ -1,3 +1,8 @@
+// Machine-local secrets (AWS keys etc.) — loaded BEFORE .env so they win,
+// because dotenv never overrides variables that are already set. The file
+// lives outside the repo (create once: chmod 600). Missing file = no-op,
+// so dev machines and fresh checkouts are unaffected.
+require('dotenv').config({ path: '/etc/driveinnovate/secrets.env' });
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
